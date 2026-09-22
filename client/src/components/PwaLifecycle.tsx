@@ -3,6 +3,7 @@ import { Download, RefreshCw, WifiOff, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { registerSW } from "virtual:pwa-register";
+import { useServerReachability } from "@/lib/connection";
 
 type UpdateServiceWorker = () => Promise<void>;
 
@@ -12,16 +13,12 @@ type InstallPromptEvent = Event & {
 };
 
 export function PwaLifecycle() {
-  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const { isReachable: isOnline } = useServerReachability();
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [updateServiceWorker, setUpdateServiceWorker] = useState<UpdateServiceWorker | null>(null);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
 
   useEffect(() => {
-    const syncConnectionState = () => setIsOnline(navigator.onLine);
-    window.addEventListener("online", syncConnectionState);
-    window.addEventListener("offline", syncConnectionState);
-
     const update = registerSW({
       immediate: true,
       onNeedRefresh() {
@@ -34,8 +31,6 @@ export function PwaLifecycle() {
     });
 
     return () => {
-      window.removeEventListener("online", syncConnectionState);
-      window.removeEventListener("offline", syncConnectionState);
     };
   }, []);
 

@@ -2,6 +2,7 @@ import { trpc } from "@/lib/trpc";
 import { TRPCClientError } from "@trpc/client";
 import { useCallback, useEffect, useMemo } from "react";
 import { clearOfflineWorkspaceSnapshots } from "@/lib/offlineSnapshot";
+import { useServerReachability } from "@/lib/connection";
 
 const USER_STORAGE_KEY = "golden-prime-user-info";
 
@@ -23,6 +24,7 @@ type UseAuthOptions = {
 
 export function useAuth(options?: UseAuthOptions) {
   const { redirectOnUnauthenticated = false, redirectPath } = options ?? {};
+  const { isReachable: isOnline } = useServerReachability();
   const utils = trpc.useUtils();
 
   const meQuery = trpc.auth.me.useQuery(undefined, {
@@ -35,7 +37,7 @@ export function useAuth(options?: UseAuthOptions) {
       utils.auth.me.setData(undefined, null);
     },
   });
-  const offlineUser = useMemo(() => !navigator.onLine ? readOfflineUser() : null, [meQuery.data]);
+  const offlineUser = useMemo(() => !isOnline ? readOfflineUser() : null, [isOnline, meQuery.data]);
 
   const logout = useCallback(async () => {
     try {

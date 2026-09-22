@@ -3,7 +3,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAuth } from "@/_core/hooks/useAuth";
 import DashboardLayout from "@/components/DashboardLayout";
 import { PwaLifecycle } from "@/components/PwaLifecycle";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense } from "react";
 import { Redirect, Route, Switch, useLocation } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
@@ -67,17 +67,6 @@ function WorkspaceRoutes() {
 
 function AppShell() {
   const { user, loading } = useAuth();
-  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
-  useEffect(() => {
-    const syncConnection = () => setIsOnline(navigator.onLine);
-    window.addEventListener("online", syncConnection);
-    window.addEventListener("offline", syncConnection);
-    return () => {
-      window.removeEventListener("online", syncConnection);
-      window.removeEventListener("offline", syncConnection);
-    };
-  }, []);
-  if (!isOnline) return <Redirect to="/offline" />;
   if (loading) return <div className="grid min-h-screen place-items-center"><div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" /></div>;
   if (!user) return <Redirect to="/login" />;
   if (user.role === "tenant") return <TenantPortal />;

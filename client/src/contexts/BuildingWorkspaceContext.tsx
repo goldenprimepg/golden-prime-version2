@@ -3,6 +3,7 @@ import { trpc } from "@/lib/trpc";
 import { liveQueryOptions } from "@/lib/liveQuery";
 import { loadOfflineWorkspaceSnapshot, saveOfflineWorkspaceSnapshot } from "@/lib/offlineSnapshot";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { useServerReachability } from "@/lib/connection";
 import type { inferRouterOutputs } from "@trpc/server";
 import type { AppRouter } from "../../../server/routers";
 
@@ -26,7 +27,7 @@ const BuildingWorkspaceContext = createContext<BuildingWorkspaceValue | null>(nu
 
 export function BuildingWorkspaceProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const { isReachable: isOnline } = useServerReachability();
   const liveBuildingsQuery = trpc.pg.buildings.list.useQuery(undefined, { ...liveQueryOptions, enabled: isOnline });
   const [buildingId, setBuildingIdState] = useState<number | null>(() => {
     const stored = Number(window.localStorage.getItem(STORAGE_KEY));
@@ -38,16 +39,6 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     data: liveBuildingsQuery.data ?? (fallbackBuilding ? [fallbackBuilding] : undefined),
     isLoading: isOnline && liveBuildingsQuery.isLoading,
   }), [fallbackBuilding, isOnline, liveBuildingsQuery.data, liveBuildingsQuery.isLoading]);
-
-  useEffect(() => {
-    const syncConnection = () => setIsOnline(navigator.onLine);
-    window.addEventListener("online", syncConnection);
-    window.addEventListener("offline", syncConnection);
-    return () => {
-      window.removeEventListener("online", syncConnection);
-      window.removeEventListener("offline", syncConnection);
-    };
-  }, []);
 
   useEffect(() => {
     if (buildingsQuery.isLoading) return;

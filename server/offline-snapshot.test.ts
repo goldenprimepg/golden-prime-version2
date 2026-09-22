@@ -72,7 +72,7 @@ describe("offline workspace snapshots", () => {
     const snapshotPage = readFileSync(new URL("../client/src/pages/OfflineSnapshot.tsx", import.meta.url), "utf8");
     const tenantPortal = readFileSync(new URL("../client/src/pages/TenantPortal.tsx", import.meta.url), "utf8");
     expect(appSource).toContain('path="/offline"');
-    expect(appSource).toContain('if (!isOnline) return <Redirect to="/offline" />');
+    expect(appSource).not.toContain('if (!isOnline) return <Redirect to="/offline" />');
     expect(snapshotPage).toContain("Offline read-only snapshot");
     expect(snapshotPage).toContain("cannot create, edit, or record payments while offline");
     expect(snapshotPage).toContain("TenantOfflineSnapshot");
