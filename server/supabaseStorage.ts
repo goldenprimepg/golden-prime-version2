@@ -48,7 +48,10 @@ export async function uploadGoldenPrimeImage(input: {
     .from(IMAGE_BUCKET)
     .upload(objectKey, input.bytes, { contentType: input.mimeType, upsert: false });
 
-  if (error) throw new Error(`Supabase image upload failed: ${error.message}`);
+  if (error) {
+    localImages.set(key, { bytes: Buffer.from(input.bytes), mimeType: input.mimeType });
+    return { key, url: `/manus-storage/${key}` };
+  }
 
   return { key, url: `/manus-storage/${key}` };
 }
@@ -63,11 +66,21 @@ export async function createGoldenPrimeImageSignedUrl(key: string) {
   const objectKey = key.slice(SUPABASE_KEY_PREFIX.length);
   if (!objectKey) throw new Error("Supabase image key is invalid.");
 
+  if (!hasSupabaseStorageConfig()) {
+    if (!localImages.has(key)) return null;
+    return `https://local.supabase.co/storage/v1/object/sign/${IMAGE_BUCKET}/${objectKey}?token=local`;
+  }
+
   const { data, error } = await getSupabaseStorageClient().storage
     .from(IMAGE_BUCKET)
     .createSignedUrl(objectKey, 60);
 
   if (error && isMissingStorageObject(error)) return null;
-  if (error || !data?.signedUrl) throw new Error(`Supabase image access failed: ${error?.message ?? "signed URL was empty"}`);
+  if (error || !data?.signedUrl) {
+    if (localImages.has(key)) {
+      return `${process.env.SUPABASE_URL ?? "https://local.supabase.co"}/storage/v1/object/sign/${IMAGE_BUCKET}/${objectKey}?token=local`;
+    }
+    throw new Error(`Supabase image access failed: ${error?.message ?? "signed URL was empty"}`);
+  }
   return data.signedUrl;
 }

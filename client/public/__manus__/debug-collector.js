@@ -452,7 +452,7 @@
 
   var originalFetch = window.fetch.bind(window);
 
-  window.fetch = function (input, init) {
+  var wrappedFetch = function (input, init) {
     init = init || {};
     var startTime = Date.now();
     // Handle string, Request object, or URL object
@@ -589,6 +589,11 @@
         throw error;
       });
   };
+  try {
+    window.fetch = wrappedFetch;
+  } catch (e) {
+    // Ignore when window.fetch has only a getter in iframe environments
+  }
 
   // ==========================================================================
   // XHR Interception

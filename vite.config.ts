@@ -177,8 +177,6 @@ const plugins = [
       navigateFallbackDenylist: [/^\/api\//],
     },
   }),
-  vitePluginManusRuntime(),
-  vitePluginManusDebugCollector(),
 ];
 
 export default defineConfig({

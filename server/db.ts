@@ -43,6 +43,7 @@ type DatabaseConnection = NodePgDatabase<typeof postgresSchema>;
 let cachedDb: DatabaseConnection | null = null;
 let cachedPostgresPool: Pool | null = null;
 let embeddedInitPromise: Promise<DatabaseConnection> | null = null;
+let usingEmbeddedFallback = false;
 
 function getExternalConnectionString() {
   return process.env.SUPABASE_DATABASE_URL
@@ -52,7 +53,7 @@ function getExternalConnectionString() {
 }
 
 export function isEmbeddedDatabaseActive() {
-  return !getExternalConnectionString();
+  return usingEmbeddedFallback || !getExternalConnectionString();
 }
 
 function hashSeedPassword(password: string) {
@@ -61,54 +62,71 @@ function hashSeedPassword(password: string) {
   return `${salt}:${derived}`;
 }
 
-async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
-  const existingUsers = await db.select({ id: users.id }).from(users).limit(1);
-  if (existingUsers.length > 0) return;
-
+async function ensureCoreSeedAccounts(db: DatabaseConnection) {
   const defaultPasswordHash = hashSeedPassword("GoldenPrime2026");
+  const coreAccounts: Array<typeof users.$inferInsert> = [
+    {
+      openId: "seed-owner-kapil",
+      name: "Kapil",
+      email: "owner@goldenprimepg.com",
+      phone: "7668992940",
+      passwordHash: defaultPasswordHash,
+      loginMethod: "phone-password",
+      role: "admin",
+    },
+    {
+      openId: "seed-manager-goldenprime",
+      name: "Building Manager",
+      email: "goldenprimepg@gmail.com",
+      phone: "9990636862",
+      passwordHash: defaultPasswordHash,
+      loginMethod: "phone-password",
+      role: "manager",
+    },
+    {
+      openId: "seed-tenant-shashank",
+      name: "Shashank",
+      email: "shashank@example.com",
+      phone: "9123456789",
+      passwordHash: defaultPasswordHash,
+      loginMethod: "phone-password",
+      role: "tenant",
+    },
+    {
+      openId: "seed-tenant-tanu",
+      name: "Tanu",
+      email: "tanu@example.com",
+      phone: "9876543211",
+      passwordHash: defaultPasswordHash,
+      loginMethod: "phone-password",
+      role: "tenant",
+    },
+  ];
+
+  for (const account of coreAccounts) {
+    const existing = (await db.select({ id: users.id }).from(users).where(eq(users.phone, account.phone!)).limit(1))[0];
+    if (!existing) {
+      await db.insert(users).values(account).onConflictDoNothing();
+    }
+  }
+}
+
+async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
+  const existingBuildings = await db.select({ id: buildings.id }).from(buildings).limit(1);
+  if (existingBuildings.length > 0) {
+    await ensureCoreSeedAccounts(db);
+    return;
+  }
+
+  await ensureCoreSeedAccounts(db);
   const currentMonth = formatRentMonth(new Date());
   const dueDate = getRentDueDate(currentMonth, 5);
   const today = new Date().toISOString().slice(0, 10);
 
-  const [owner] = await db.insert(users).values({
-    openId: "seed-owner-kapil",
-    name: "Kapil",
-    email: "owner@goldenprimepg.com",
-    phone: "7668992940",
-    passwordHash: defaultPasswordHash,
-    loginMethod: "phone-password",
-    role: "admin",
-  }).returning({ id: users.id });
-
-  const [manager] = await db.insert(users).values({
-    openId: "seed-manager-goldenprime",
-    name: "Building Manager",
-    email: "goldenprimepg@gmail.com",
-    phone: "9990636862",
-    passwordHash: defaultPasswordHash,
-    loginMethod: "phone-password",
-    role: "manager",
-  }).returning({ id: users.id });
-
-  const [tenantUser1] = await db.insert(users).values({
-    openId: "seed-tenant-shashank",
-    name: "Shashank",
-    email: "shashank@example.com",
-    phone: "9123456789",
-    passwordHash: defaultPasswordHash,
-    loginMethod: "phone-password",
-    role: "tenant",
-  }).returning({ id: users.id });
-
-  const [tenantUser2] = await db.insert(users).values({
-    openId: "seed-tenant-tanu",
-    name: "Tanu",
-    email: "tanu@example.com",
-    phone: "9876543211",
-    passwordHash: defaultPasswordHash,
-    loginMethod: "phone-password",
-    role: "tenant",
-  }).returning({ id: users.id });
+  const owner = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "7668992940")).limit(1))[0];
+  const manager = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9990636862")).limit(1))[0];
+  const tenantUser1 = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9123456789")).limit(1))[0];
+  const tenantUser2 = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9876543211")).limit(1))[0];
 
   if (!owner || !manager || !tenantUser1 || !tenantUser2) return;
 
@@ -348,12 +366,11 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
 
     const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
     if (!check.rows[0]?.reg) {
-      await pglite.exec(`
-        DO $ BEGIN CREATE ROLE anon; EXCEPTION WHEN duplicate_object THEN NULL; END $;
-        DO $ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $;
-      `);
       const schemaPath = path.resolve(process.cwd(), "supabase", "schema.sql");
-      const rawSchema = fs.readFileSync(schemaPath, "utf8").replace(/--> statement-breakpoint/g, "\n");
+      const rawSchema = fs
+        .readFileSync(schemaPath, "utf8")
+        .replace(/--> statement-breakpoint/g, "\n")
+        .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
       await pglite.exec(rawSchema);
     }
 
@@ -411,12 +428,13 @@ export async function getDb(): Promise<DatabaseConnection | null> {
     ?? process.env.POSTGRES_URL
     ?? process.env.POSTGRES_PRISMA_URL
     ?? process.env.POSTGRES_URL_NON_POOLING;
-  if (!connectionString) {
+  if (!connectionString || usingEmbeddedFallback) {
+    usingEmbeddedFallback = true;
     return initEmbeddedPglite();
   }
   const configuredMax = Number(process.env.SUPABASE_POOL_MAX ?? 8);
   const max = Number.isInteger(configuredMax) && configuredMax >= 2 && configuredMax <= 12 ? configuredMax : 8;
-  cachedPostgresPool = new Pool({
+  const pool = new Pool({
     connectionString,
     max,
     connectionTimeoutMillis: 15_000,
@@ -424,9 +442,16 @@ export async function getDb(): Promise<DatabaseConnection | null> {
     allowExitOnIdle: true,
     ssl: { rejectUnauthorized: false },
   });
-  cachedDb = drizzlePostgres(cachedPostgresPool, { schema: postgresSchema });
-
-  return cachedDb;
+  try {
+    await pool.query("SELECT 1");
+    cachedPostgresPool = pool;
+    cachedDb = drizzlePostgres(cachedPostgresPool, { schema: postgresSchema });
+    return cachedDb;
+  } catch {
+    await pool.end().catch(() => {});
+    usingEmbeddedFallback = true;
+    return initEmbeddedPglite();
+  }
 }
 
 async function requireDb() {
