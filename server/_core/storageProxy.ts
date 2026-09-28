@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { ENV } from "./env";
-import { createGoldenPrimeImageSignedUrl } from "../supabaseStorage";
+import { createGoldenPrimeImageSignedUrl, getLocalGoldenPrimeImage } from "../supabaseStorage";
 
 export function registerStorageProxy(app: Express) {
   app.get(["/manus-storage/*", "/api/storage/*"], async (req, res) => {
@@ -11,6 +11,13 @@ export function registerStorageProxy(app: Express) {
     }
 
     if (key.startsWith("supabase/")) {
+      const localImage = getLocalGoldenPrimeImage(key);
+      if (localImage) {
+        res.set("Content-Type", localImage.mimeType);
+        res.set("Cache-Control", "private, max-age=60");
+        res.status(200).send(localImage.bytes);
+        return;
+      }
       try {
         const signedUrl = await createGoldenPrimeImageSignedUrl(key);
         if (!signedUrl) {

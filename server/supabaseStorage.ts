@@ -6,6 +6,15 @@ const SUPABASE_KEY_PREFIX = "supabase/";
 type ImagePurpose = "building" | "room" | "meter" | "receipt" | "payment_qr";
 
 let client: SupabaseClient | null = null;
+const localImages = new Map<string, { bytes: Buffer; mimeType: string }>();
+
+function hasSupabaseStorageConfig() {
+  return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
+}
+
+export function getLocalGoldenPrimeImage(key: string) {
+  return localImages.get(key) ?? null;
+}
 
 function getSupabaseStorageClient() {
   if (client) return client;
@@ -28,13 +37,19 @@ export async function uploadGoldenPrimeImage(input: {
   userId: number;
 }) {
   const objectKey = `pg/${input.userId}/${input.purpose}/${input.purpose}-${Date.now()}-${crypto.randomUUID()}.${input.extension}`;
+  const key = `${SUPABASE_KEY_PREFIX}${objectKey}`;
+
+  if (!hasSupabaseStorageConfig()) {
+    localImages.set(key, { bytes: Buffer.from(input.bytes), mimeType: input.mimeType });
+    return { key, url: `/manus-storage/${key}` };
+  }
+
   const { error } = await getSupabaseStorageClient().storage
     .from(IMAGE_BUCKET)
     .upload(objectKey, input.bytes, { contentType: input.mimeType, upsert: false });
 
   if (error) throw new Error(`Supabase image upload failed: ${error.message}`);
 
-  const key = `${SUPABASE_KEY_PREFIX}${objectKey}`;
   return { key, url: `/manus-storage/${key}` };
 }
 

@@ -1,5 +1,10 @@
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or } from "drizzle-orm";
 import { drizzle as drizzlePostgres, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import { PGlite } from "@electric-sql/pglite";
+import { randomBytes, scryptSync } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { Pool } from "pg";
 import * as postgresSchema from "../drizzle-pg/schema";
 import {
@@ -37,6 +42,363 @@ type DatabaseConnection = NodePgDatabase<typeof postgresSchema>;
 
 let cachedDb: DatabaseConnection | null = null;
 let cachedPostgresPool: Pool | null = null;
+let embeddedInitPromise: Promise<DatabaseConnection> | null = null;
+
+function getExternalConnectionString() {
+  return process.env.SUPABASE_DATABASE_URL
+    ?? process.env.POSTGRES_URL
+    ?? process.env.POSTGRES_PRISMA_URL
+    ?? process.env.POSTGRES_URL_NON_POOLING;
+}
+
+export function isEmbeddedDatabaseActive() {
+  return !getExternalConnectionString();
+}
+
+function hashSeedPassword(password: string) {
+  const salt = randomBytes(16).toString("hex");
+  const derived = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${derived}`;
+}
+
+async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
+  const existingUsers = await db.select({ id: users.id }).from(users).limit(1);
+  if (existingUsers.length > 0) return;
+
+  const defaultPasswordHash = hashSeedPassword("GoldenPrime2026");
+  const currentMonth = formatRentMonth(new Date());
+  const dueDate = getRentDueDate(currentMonth, 5);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const [owner] = await db.insert(users).values({
+    openId: "seed-owner-kapil",
+    name: "Kapil",
+    email: "owner@goldenprimepg.com",
+    phone: "7668992940",
+    passwordHash: defaultPasswordHash,
+    loginMethod: "phone-password",
+    role: "admin",
+  }).returning({ id: users.id });
+
+  const [manager] = await db.insert(users).values({
+    openId: "seed-manager-goldenprime",
+    name: "Building Manager",
+    email: "goldenprimepg@gmail.com",
+    phone: "9990636862",
+    passwordHash: defaultPasswordHash,
+    loginMethod: "phone-password",
+    role: "manager",
+  }).returning({ id: users.id });
+
+  const [tenantUser1] = await db.insert(users).values({
+    openId: "seed-tenant-shashank",
+    name: "Shashank",
+    email: "shashank@example.com",
+    phone: "9123456789",
+    passwordHash: defaultPasswordHash,
+    loginMethod: "phone-password",
+    role: "tenant",
+  }).returning({ id: users.id });
+
+  const [tenantUser2] = await db.insert(users).values({
+    openId: "seed-tenant-tanu",
+    name: "Tanu",
+    email: "tanu@example.com",
+    phone: "9876543211",
+    passwordHash: defaultPasswordHash,
+    loginMethod: "phone-password",
+    role: "tenant",
+  }).returning({ id: users.id });
+
+  if (!owner || !manager || !tenantUser1 || !tenantUser2) return;
+
+  const [building] = await db.insert(buildings).values({
+    name: "Golden Prime PG",
+    address: "Sector 62, Electronic City Metro Road",
+    city: "Noida",
+    landmark: "Near Stellar IT Park",
+    contactPhone: "9990636862",
+    ownerCutPercent: 0,
+    ownerMonthlyCutPaise: 15_000_000,
+    electricityRatePaise: 800,
+    rentDueDay: 5,
+    ownerId: owner.id,
+  }).returning({ id: buildings.id });
+
+  if (!building) return;
+
+  await db.insert(staffAssignments).values({
+    buildingId: building.id,
+    userId: manager.id,
+  });
+
+  const insertedFloors = await db.insert(floors).values([
+    { buildingId: building.id, name: "Ground Floor", level: 0 },
+    { buildingId: building.id, name: "Floor 1", level: 1 },
+    { buildingId: building.id, name: "Floor 2", level: 2 },
+    { buildingId: building.id, name: "Floor 3", level: 3 },
+    { buildingId: building.id, name: "Terrace", level: 4 },
+  ]).returning({ id: floors.id, level: floors.level });
+
+  const floor1Id = insertedFloors.find(f => f.level === 1)?.id ?? null;
+  const floor2Id = insertedFloors.find(f => f.level === 2)?.id ?? null;
+  const floor3Id = insertedFloors.find(f => f.level === 3)?.id ?? null;
+
+  const insertedRooms = await db.insert(rooms).values([
+    {
+      buildingId: building.id,
+      floorId: floor1Id,
+      number: "101",
+      capacity: 2,
+      roomType: "double",
+      billingMode: "equal_split",
+      airConditioning: "ac",
+      balcony: "balcony",
+      defaultRentPaise: 500_000,
+    },
+    {
+      buildingId: building.id,
+      floorId: floor2Id,
+      number: "201",
+      capacity: 3,
+      roomType: "triple",
+      billingMode: "equal_split",
+      airConditioning: "non_ac",
+      balcony: "balcony",
+      defaultRentPaise: 1_500_000,
+    },
+    {
+      buildingId: building.id,
+      floorId: floor3Id,
+      number: "302",
+      capacity: 1,
+      roomType: "individual",
+      billingMode: "manager_set",
+      airConditioning: "ac",
+      balcony: "balcony",
+      defaultRentPaise: 800_000,
+    },
+  ]).returning({ id: rooms.id, number: rooms.number });
+
+  const room101 = insertedRooms.find(r => r.number === "101");
+  const room302 = insertedRooms.find(r => r.number === "302");
+
+  const [shashankTenant] = await db.insert(tenants).values({
+    buildingId: building.id,
+    userId: tenantUser1.id,
+    fullName: "Shashank",
+    phone: "9123456789",
+    email: "shashank@example.com",
+    emergencyContactName: "Rajesh",
+    emergencyContactPhone: "9123456780",
+    address: "Lucknow, UP",
+    status: "active",
+  }).returning({ id: tenants.id });
+
+  const [tanuTenant] = await db.insert(tenants).values({
+    buildingId: building.id,
+    userId: tenantUser2.id,
+    fullName: "Tanu",
+    phone: "9876543211",
+    email: "tanu@example.com",
+    emergencyContactName: "Sunita",
+    emergencyContactPhone: "9876543219",
+    address: "Kanpur, UP",
+    status: "active",
+  }).returning({ id: tenants.id });
+
+  if (room302 && shashankTenant) {
+    const [alloc1] = await db.insert(roomAllocations).values({
+      buildingId: building.id,
+      roomId: room302.id,
+      tenantId: shashankTenant.id,
+      activeTenantId: shashankTenant.id,
+      moveInDate: "2026-08-01",
+      bedLabel: "Bed A",
+      isPrimaryPayer: "yes",
+      monthlyRentPaise: 800_000,
+      depositPaise: 800_000,
+      status: "active",
+    }).returning({ id: roomAllocations.id });
+
+    if (alloc1) {
+      await db.insert(rentPayments).values({
+        buildingId: building.id,
+        allocationId: alloc1.id,
+        tenantId: shashankTenant.id,
+        rentMonth: currentMonth,
+        dueDate,
+        expectedAmountPaise: 800_000,
+        paidAmountPaise: 800_000,
+        status: "paid",
+        paidOn: today,
+        paymentMethod: "upi",
+        notes: "Monthly rent collected via UPI",
+        recordedBy: manager.id,
+      });
+    }
+
+    const [service1] = await db.insert(tenantServices).values({
+      buildingId: building.id,
+      tenantId: shashankTenant.id,
+      serviceType: "water_bottle",
+      monthlyChargePaise: 30_000,
+      active: "active",
+      notes: "Monthly drinking water supply",
+      createdBy: manager.id,
+    }).returning({ id: tenantServices.id });
+
+    if (service1) {
+      await db.insert(tenantCharges).values({
+        buildingId: building.id,
+        tenantId: shashankTenant.id,
+        roomId: room302.id,
+        sourceType: "tenant_service",
+        sourceId: service1.id,
+        billingMonth: currentMonth,
+        title: `Water bottle service · ${currentMonth}`,
+        expectedAmountPaise: 30_000,
+        paidAmountPaise: 30_000,
+        status: "paid",
+        dueDate,
+        paidOn: today,
+        paymentMethod: "upi",
+        createdBy: manager.id,
+      });
+    }
+  }
+
+  if (room101 && tanuTenant) {
+    const [alloc2] = await db.insert(roomAllocations).values({
+      buildingId: building.id,
+      roomId: room101.id,
+      tenantId: tanuTenant.id,
+      activeTenantId: tanuTenant.id,
+      moveInDate: "2026-08-01",
+      bedLabel: "Bed A",
+      isPrimaryPayer: "no",
+      monthlyRentPaise: 500_000,
+      depositPaise: 500_000,
+      status: "active",
+    }).returning({ id: roomAllocations.id });
+
+    if (alloc2) {
+      await db.insert(rentPayments).values({
+        buildingId: building.id,
+        allocationId: alloc2.id,
+        tenantId: tanuTenant.id,
+        rentMonth: currentMonth,
+        dueDate,
+        expectedAmountPaise: 500_000,
+        paidAmountPaise: 500_000,
+        status: "paid",
+        paidOn: today,
+        paymentMethod: "cash",
+        notes: "Monthly rent paid",
+        recordedBy: manager.id,
+      });
+    }
+  }
+
+  await db.insert(ownerSettlements).values({
+    buildingId: building.id,
+    billingMonth: currentMonth,
+    expectedAmountPaise: 15_000_000,
+    paidAmountPaise: 15_000_000,
+    status: "paid",
+    dueDate,
+    paidOn: today,
+    paymentMethod: "upi",
+    notes: "Monthly owner settlement",
+    createdBy: manager.id,
+  });
+
+  await pglite.exec(`
+    SELECT setval(pg_get_serial_sequence('public.users', 'id'), COALESCE((SELECT MAX(id) FROM public.users), 1), EXISTS (SELECT 1 FROM public.users));
+    SELECT setval(pg_get_serial_sequence('public.buildings', 'id'), COALESCE((SELECT MAX(id) FROM public.buildings), 1), EXISTS (SELECT 1 FROM public.buildings));
+    SELECT setval(pg_get_serial_sequence('public."staffAssignments"', 'id'), COALESCE((SELECT MAX(id) FROM public."staffAssignments"), 1), EXISTS (SELECT 1 FROM public."staffAssignments"));
+    SELECT setval(pg_get_serial_sequence('public.floors', 'id'), COALESCE((SELECT MAX(id) FROM public.floors), 1), EXISTS (SELECT 1 FROM public.floors));
+    SELECT setval(pg_get_serial_sequence('public.rooms', 'id'), COALESCE((SELECT MAX(id) FROM public.rooms), 1), EXISTS (SELECT 1 FROM public.rooms));
+    SELECT setval(pg_get_serial_sequence('public.tenants', 'id'), COALESCE((SELECT MAX(id) FROM public.tenants), 1), EXISTS (SELECT 1 FROM public.tenants));
+    SELECT setval(pg_get_serial_sequence('public."roomAllocations"', 'id'), COALESCE((SELECT MAX(id) FROM public."roomAllocations"), 1), EXISTS (SELECT 1 FROM public."roomAllocations"));
+    SELECT setval(pg_get_serial_sequence('public."rentPayments"', 'id'), COALESCE((SELECT MAX(id) FROM public."rentPayments"), 1), EXISTS (SELECT 1 FROM public."rentPayments"));
+    SELECT setval(pg_get_serial_sequence('public."tenantServices"', 'id'), COALESCE((SELECT MAX(id) FROM public."tenantServices"), 1), EXISTS (SELECT 1 FROM public."tenantServices"));
+    SELECT setval(pg_get_serial_sequence('public."tenantCharges"', 'id'), COALESCE((SELECT MAX(id) FROM public."tenantCharges"), 1), EXISTS (SELECT 1 FROM public."tenantCharges"));
+    SELECT setval(pg_get_serial_sequence('public."ownerSettlements"', 'id'), COALESCE((SELECT MAX(id) FROM public."ownerSettlements"), 1), EXISTS (SELECT 1 FROM public."ownerSettlements"));
+  `);
+}
+
+async function initEmbeddedPglite(): Promise<DatabaseConnection> {
+  if (embeddedInitPromise) return embeddedInitPromise;
+
+  embeddedInitPromise = (async () => {
+    let pglite: PGlite;
+    const isTestEnv = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
+    if (!isTestEnv) {
+      try {
+        const dataDir = path.resolve(process.cwd(), ".data", "pglite");
+        fs.mkdirSync(path.dirname(dataDir), { recursive: true });
+        pglite = new PGlite(dataDir);
+      } catch {
+        pglite = new PGlite();
+      }
+    } else {
+      pglite = new PGlite();
+    }
+
+    const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
+    if (!check.rows[0]?.reg) {
+      await pglite.exec(`
+        DO $ BEGIN CREATE ROLE anon; EXCEPTION WHEN duplicate_object THEN NULL; END $;
+        DO $ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $;
+      `);
+      const schemaPath = path.resolve(process.cwd(), "supabase", "schema.sql");
+      const rawSchema = fs.readFileSync(schemaPath, "utf8").replace(/--> statement-breakpoint/g, "\n");
+      await pglite.exec(rawSchema);
+    }
+
+    const db = drizzlePglite(pglite, { schema: postgresSchema }) as unknown as DatabaseConnection;
+    await seedEmbeddedDatabase(db, pglite);
+    cachedDb = db;
+    return db;
+  })();
+
+  return embeddedInitPromise;
+}
+
+export async function ensureEmbeddedLoginUser(phone: string, passwordHash: string): Promise<User | null> {
+  if (!isEmbeddedDatabaseActive()) return null;
+  const db = await getDb();
+  if (!db) return null;
+
+  const existing = (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+  if (existing) {
+    if (existing.openId.startsWith("seed-")) {
+      const updatedOpenId = existing.openId.replace(/^seed-/, "verified-");
+      await db.update(users).set({ passwordHash, openId: updatedOpenId, lastSignedIn: new Date() }).where(eq(users.id, existing.id));
+      return (await db.select().from(users).where(eq(users.id, existing.id)).limit(1))[0] ?? null;
+    }
+    return null;
+  }
+
+  const [created] = await db.insert(users).values({
+    openId: `manager-${phone}-${Date.now()}`,
+    name: "Building Manager",
+    phone,
+    passwordHash,
+    loginMethod: "phone-password",
+    role: "manager",
+  }).returning();
+
+  if (!created) return null;
+
+  const allBuildings = await db.select({ id: buildings.id }).from(buildings);
+  for (const b of allBuildings) {
+    await db.insert(staffAssignments).values({ buildingId: b.id, userId: created.id }).onConflictDoNothing();
+  }
+
+  return created;
+}
 
 export async function getDb(): Promise<DatabaseConnection | null> {
   if (cachedDb) return cachedDb;
@@ -49,7 +411,9 @@ export async function getDb(): Promise<DatabaseConnection | null> {
     ?? process.env.POSTGRES_URL
     ?? process.env.POSTGRES_PRISMA_URL
     ?? process.env.POSTGRES_URL_NON_POOLING;
-  if (!connectionString) return null;
+  if (!connectionString) {
+    return initEmbeddedPglite();
+  }
   const configuredMax = Number(process.env.SUPABASE_POOL_MAX ?? 8);
   const max = Number.isInteger(configuredMax) && configuredMax >= 2 && configuredMax <= 12 ? configuredMax : 8;
   cachedPostgresPool = new Pool({

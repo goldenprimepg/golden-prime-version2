@@ -54,6 +54,7 @@ export function useAuth(options?: UseAuthOptions) {
       const storedUser = meQuery.data ?? readOfflineUser();
       if (storedUser?.id) clearOfflineWorkspaceSnapshots(storedUser.id);
       window.localStorage.removeItem(USER_STORAGE_KEY);
+      window.localStorage.removeItem("golden_prime_session_token");
       utils.auth.me.setData(undefined, null);
       await utils.auth.me.invalidate();
     }
