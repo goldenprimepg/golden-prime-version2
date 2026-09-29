@@ -3,7 +3,7 @@ import { SignJWT, jwtVerify } from "jose";
 import { parse as parseCookie } from "cookie";
 import type { Request, Response } from "express";
 import type { User } from "../drizzle-pg/schema";
-import { ensureEmbeddedLoginUser, getUserById, getUserByPhone, isEmbeddedDatabaseActive } from "./db";
+import { getUserById, getUserByPhone, getUserByPhoneOrUsername } from "./db";
 
 export const PHONE_SESSION_COOKIE = "golden_prime_session";
 export const PHONE_SESSION_HEADER = "x-session-token";
@@ -46,6 +46,7 @@ export async function createPhoneSession(user: User) {
 
 export function setPhoneSessionCookie(res: Response, req: Request, token: string) {
   res.setHeader?.(PHONE_SESSION_HEADER, token);
+  res.setHeader?.("Access-Control-Expose-Headers", PHONE_SESSION_HEADER);
   res.cookie(PHONE_SESSION_COOKIE, token, {
     httpOnly: true,
     path: "/",
@@ -57,6 +58,7 @@ export function setPhoneSessionCookie(res: Response, req: Request, token: string
 
 export function clearPhoneSessionCookie(res: Response, req: Request) {
   res.setHeader?.(PHONE_SESSION_HEADER, "");
+  res.setHeader?.("Access-Control-Expose-Headers", PHONE_SESSION_HEADER);
   res.clearCookie(PHONE_SESSION_COOKIE, { httpOnly: true, path: "/", sameSite: "lax", secure: isSecureRequest(req) });
 }
 
@@ -69,11 +71,7 @@ function wait(milliseconds: number) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-export async function getPhoneSessionUser(req: Request) {
-  const cookieToken = parseCookie(req.headers.cookie ?? "")[PHONE_SESSION_COOKIE];
-  const headerValue = req.headers?.[PHONE_SESSION_HEADER];
-  const headerToken = typeof headerValue === "string" ? headerValue.trim() : Array.isArray(headerValue) ? headerValue[0]?.trim() : "";
-  const token = cookieToken || headerToken;
+async function resolveUserFromToken(token: string): Promise<User | null> {
   if (!token) return null;
   let userId: number;
   try {
@@ -95,14 +93,26 @@ export async function getPhoneSessionUser(req: Request) {
   return null;
 }
 
-export async function authenticatePhonePassword(phone: string, password: string) {
-  const normalizedPhone = normalizePhone(phone);
-  if (normalizedPhone.length !== 10) return null;
-  const user = await getUserByPhone(normalizedPhone);
-  if (user?.passwordHash && verifyPassword(password, user.passwordHash)) return user;
-  if (isEmbeddedDatabaseActive() && password.trim().length >= 4) {
-    const fallbackUser = await ensureEmbeddedLoginUser(normalizedPhone, hashPassword(password));
-    if (fallbackUser) return fallbackUser;
+export async function getPhoneSessionUser(req: Request) {
+  const cookieToken = parseCookie(req.headers.cookie ?? "")[PHONE_SESSION_COOKIE] ?? "";
+  const headerValue = req.headers?.[PHONE_SESSION_HEADER];
+  const headerToken = typeof headerValue === "string" ? headerValue.trim() : Array.isArray(headerValue) ? (headerValue[0]?.trim() ?? "") : "";
+  const candidates = Array.from(new Set([headerToken, cookieToken].filter(Boolean)));
+  for (const token of candidates) {
+    const user = await resolveUserFromToken(token);
+    if (user) return user;
   }
   return null;
+}
+
+export async function authenticatePhonePassword(phoneOrUsername: string, password: string) {
+  const trimmed = phoneOrUsername.trim();
+  if (!trimmed || !password) return null;
+  const normalizedPhone = normalizePhone(trimmed);
+  const user = normalizedPhone.length === 10
+    ? await getUserByPhone(normalizedPhone)
+    : await getUserByPhoneOrUsername(trimmed);
+  if (!user?.passwordHash) return null;
+  if (!verifyPassword(password, user.passwordHash)) return null;
+  return user;
 }

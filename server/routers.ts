@@ -11,7 +11,7 @@ export const appRouter = router({
   system: systemRouter,
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user ? toSafeUser(opts.ctx.user) : null),
-    login: publicProcedure.input(z.object({ phone: z.string().min(10).max(20), password: z.string().min(1).max(128) })).mutation(async ({ ctx, input }) => {
+    login: publicProcedure.input(z.object({ phone: z.string().trim().min(3).max(64), password: z.string().min(1).max(128) })).mutation(async ({ ctx, input }) => {
       const user = await authenticatePhonePassword(input.phone, input.password);
       if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid phone number or password." });
       const token = await createPhoneSession(user);

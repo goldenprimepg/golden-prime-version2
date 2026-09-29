@@ -11,17 +11,29 @@ export default function Login() {
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const utils = trpc.useUtils();
+  const getRoleDestination = (role?: string | null) => {
+    if (role === "tenant") return "/tenant";
+    if (role === "admin") return "/";
+    return "/buildings";
+  };
   const login = trpc.auth.login.useMutation({
-    onSuccess: async user => {
+    onSuccess: user => {
+      try {
+        window.localStorage.setItem("golden-prime-user-info", JSON.stringify(user));
+      } catch {
+        // Ignore storage quota errors
+      }
       utils.auth.me.setData(undefined, user);
-      await utils.auth.me.invalidate();
-      setLocation(user.role === "tenant" ? "/tenant" : "/");
+      const destination = getRoleDestination(user.role);
+      setLocation(destination);
     },
     onError: error => toast.error(error.message || "Could not sign in with those details."),
   });
 
   useEffect(() => {
-    if (!loading && user) setLocation(user.role === "tenant" ? "/tenant" : "/");
+    if (!loading && user) {
+      setLocation(getRoleDestination(user.role));
+    }
   }, [loading, setLocation, user]);
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -36,8 +48,8 @@ export default function Login() {
       <div className="relative max-w-md"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#BCE7D6]">Property operations</p><h1 className="mt-4 font-serif text-5xl font-semibold leading-[1.08] tracking-[-0.05em]">A calm, clear way to manage every stay.</h1><p className="mt-6 max-w-sm text-base leading-7 text-white/70">One secure workspace for rooms, collections, electricity, and day-to-day PG operations.</p></div>
       <div className="relative flex items-center gap-2 text-sm text-white/65"><ShieldCheck className="h-4 w-4 text-[#BCE7D6]" />Private phone-password access</div>
     </section>
-    <section className="flex items-center justify-center p-5 sm:p-8"><div className="w-full max-w-md"><div className="mb-10 flex items-center gap-3 lg:hidden"><span className="grid h-10 w-10 place-items-center rounded-2xl bg-primary/10 text-primary"><Building2 className="h-5 w-5" /></span><span className="font-semibold tracking-tight text-primary">Golden Prime PG</span></div><p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary">Welcome back</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.05em] text-foreground">Sign in to your space</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Use your registered phone number and password to access your dashboard.</p>
-      <form onSubmit={submit} className="mt-8 space-y-5 rounded-3xl border border-border/70 bg-card p-5 shadow-[0_16px_42px_rgba(23,43,77,0.08)] sm:p-7"><label className="block text-sm font-semibold"><span className="mb-2 block">Phone number</span><span className="relative block"><Phone className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-primary" /><input required name="phone" value={phone} onChange={event => setPhone(event.target.value)} inputMode="tel" autoComplete="tel" placeholder="10-digit mobile number" className="h-12 w-full rounded-xl border border-border bg-background pl-10 pr-3 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" /></span></label><label className="block text-sm font-semibold"><span className="mb-2 block">Password</span><span className="relative block"><LockKeyhole className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-primary" /><input required name="password" value={password} onChange={event => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="Your password" className="h-12 w-full rounded-xl border border-border bg-background pl-10 pr-3 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" /></span></label><button disabled={login.isPending} type="submit" className="h-12 w-full rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-[0_10px_22px_rgba(15,118,110,0.22)] transition enabled:hover:brightness-95 disabled:opacity-70">{login.isPending ? "Signing in…" : "Sign in securely"}</button></form>
+    <section className="flex items-center justify-center p-5 sm:p-8"><div className="w-full max-w-md"><div className="mb-10 flex items-center gap-3 lg:hidden"><span className="grid h-10 w-10 place-items-center rounded-2xl bg-primary/10 text-primary"><Building2 className="h-5 w-5" /></span><span className="font-semibold tracking-tight text-primary">Golden Prime PG</span></div><p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-primary">Welcome back</p><h1 className="mt-2 text-3xl font-semibold tracking-[-0.05em] text-foreground">Sign in to your space</h1><p className="mt-3 text-sm leading-6 text-muted-foreground">Use your registered phone number (or username) and password to access your dashboard.</p>
+      <form onSubmit={submit} className="mt-8 space-y-5 rounded-3xl border border-border/70 bg-card p-5 shadow-[0_16px_42px_rgba(23,43,77,0.08)] sm:p-7"><label className="block text-sm font-semibold"><span className="mb-2 block">Phone number or username</span><span className="relative block"><Phone className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-primary" /><input required name="phone" value={phone} onChange={event => setPhone(event.target.value)} autoComplete="username" placeholder="10-digit mobile number" className="h-12 w-full rounded-xl border border-border bg-background pl-10 pr-3 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" /></span></label><label className="block text-sm font-semibold"><span className="mb-2 block">Password</span><span className="relative block"><LockKeyhole className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-primary" /><input required name="password" value={password} onChange={event => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="Your password" className="h-12 w-full rounded-xl border border-border bg-background pl-10 pr-3 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10" /></span></label><button disabled={login.isPending} type="submit" className="h-12 w-full rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-[0_10px_22px_rgba(15,118,110,0.22)] transition enabled:hover:brightness-95 disabled:opacity-70">{login.isPending ? "Signing in…" : "Sign in securely"}</button></form>
       <p className="mt-5 text-center text-xs leading-5 text-muted-foreground">Contact the Building Owner if you need your phone number or access role updated.</p></div></section>
   </main>;
 }
