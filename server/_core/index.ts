@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { createServer } from "http";
 import net from "net";
+import { getDb } from "../db";
 import { createApp } from "./app";
 import { serveStatic, setupVite } from "./vite";
 
@@ -42,6 +43,7 @@ async function startServer() {
 
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
+    void getDb().catch(console.error);
   });
 }
 

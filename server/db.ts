@@ -350,37 +350,39 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
   if (embeddedInitPromise) return embeddedInitPromise;
 
   embeddedInitPromise = (async () => {
-    let pglite: PGlite;
-    const isTestEnv = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
-    if (!isTestEnv) {
-      try {
-        const dataDir = path.resolve(process.cwd(), ".data", "pglite");
-        fs.mkdirSync(path.dirname(dataDir), { recursive: true });
-        pglite = new PGlite(dataDir);
-      } catch {
-        pglite = new PGlite();
+    try {
+      const pglite = new PGlite();
+      await pglite.waitReady;
+
+      const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
+      if (!check.rows[0]?.reg) {
+        const schemaPath = path.resolve(process.cwd(), "supabase", "schema.sql");
+        const rawSchema = fs
+          .readFileSync(schemaPath, "utf8")
+          .replace(/--> statement-breakpoint/g, "\n")
+          .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
+        await pglite.exec(rawSchema);
       }
-    } else {
-      pglite = new PGlite();
-    }
 
-    const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
-    if (!check.rows[0]?.reg) {
-      const schemaPath = path.resolve(process.cwd(), "supabase", "schema.sql");
-      const rawSchema = fs
-        .readFileSync(schemaPath, "utf8")
-        .replace(/--> statement-breakpoint/g, "\n")
-        .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
-      await pglite.exec(rawSchema);
+      const db = drizzlePglite(pglite, { schema: postgresSchema }) as unknown as DatabaseConnection;
+      await seedEmbeddedDatabase(db, pglite);
+      cachedDb = db;
+      return db;
+    } catch (error) {
+      embeddedInitPromise = null;
+      cachedDb = null;
+      throw error;
     }
-
-    const db = drizzlePglite(pglite, { schema: postgresSchema }) as unknown as DatabaseConnection;
-    await seedEmbeddedDatabase(db, pglite);
-    cachedDb = db;
-    return db;
   })();
 
   return embeddedInitPromise;
+}
+
+export async function resetEmbeddedDatabase(): Promise<DatabaseConnection> {
+  cachedDb = null;
+  embeddedInitPromise = null;
+  usingEmbeddedFallback = true;
+  return initEmbeddedPglite();
 }
 
 export async function ensureEmbeddedLoginUser(phone: string, passwordHash: string): Promise<User | null> {
@@ -437,7 +439,7 @@ export async function getDb(): Promise<DatabaseConnection | null> {
   const pool = new Pool({
     connectionString,
     max,
-    connectionTimeoutMillis: 15_000,
+    connectionTimeoutMillis: 3_000,
     idleTimeoutMillis: 30_000,
     allowExitOnIdle: true,
     ssl: { rejectUnauthorized: false },
@@ -660,27 +662,33 @@ async function syncTenantCharges(input: {
   }
   const shares = input.liabilityMode === "tenant_assigned" ? [input.amountPaise] : splitPaiseEvenly(input.amountPaise, recipientIds.length);
   const existingByTenant = new Map(existing.map(charge => [charge.tenantId, charge]));
-  if (existing.some(charge => charge.paidAmountPaise > 0 && (existingByTenant.get(charge.tenantId)?.expectedAmountPaise !== shares[recipientIds.indexOf(charge.tenantId)] || !recipientIds.includes(charge.tenantId)))) {
+  if (input.sourceType !== "electricity" && existing.some(charge => charge.paidAmountPaise > 0 && (existingByTenant.get(charge.tenantId)?.expectedAmountPaise !== shares[recipientIds.indexOf(charge.tenantId)] || !recipientIds.includes(charge.tenantId)))) {
     throw new Error("This cost already has a tenant payment. Do not change its assignment or total; record a separate adjustment instead.");
   }
   if (existing.length > 0) await db.delete(tenantCharges).where(sourceCondition);
-  await db.insert(tenantCharges).values(recipientIds.map((tenantId, index) => ({
-    buildingId: input.buildingId,
-    tenantId,
-    roomId: input.roomId,
-    sourceType: input.sourceType,
-    sourceId: input.sourceId,
-    billingMonth: input.billingMonth,
-    title: input.title,
-    expectedAmountPaise: shares[index],
-    paidAmountPaise: 0,
-    status: "pending" as const,
-    dueDate: input.dueDate,
-    paidOn: null,
-    notes: input.notes,
-    receiptUrl: null,
-    createdBy: input.createdBy,
-  })));
+  await db.insert(tenantCharges).values(recipientIds.map((tenantId, index) => {
+    const previous = existingByTenant.get(tenantId);
+    const paidAmountPaise = Math.min(previous?.paidAmountPaise ?? 0, shares[index]);
+    const status = deriveTenantChargeStatus(shares[index], paidAmountPaise);
+    return {
+      buildingId: input.buildingId,
+      tenantId,
+      roomId: input.roomId,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      billingMonth: input.billingMonth,
+      title: input.title,
+      expectedAmountPaise: shares[index],
+      paidAmountPaise,
+      status,
+      dueDate: input.dueDate,
+      paidOn: status === "pending" ? null : (previous?.paidOn ?? null),
+      paymentMethod: status === "pending" ? null : (previous?.paymentMethod ?? null),
+      notes: input.notes,
+      receiptUrl: previous?.receiptUrl ?? null,
+      createdBy: input.createdBy,
+    };
+  }));
   return recipientIds;
 }
 
@@ -730,6 +738,7 @@ async function syncRoomRentTotal(input: { buildingId: number; roomId: number }) 
   if (!room) throw new Error("Room not found in the selected building.");
   if (room.roomType === "individual") return null;
   const allocations = await db.select({ monthlyRentPaise: roomAllocations.monthlyRentPaise }).from(roomAllocations).where(and(eq(roomAllocations.buildingId, input.buildingId), eq(roomAllocations.roomId, input.roomId), eq(roomAllocations.status, "active")));
+  if (allocations.length === 0) return null;
   const totalRentPaise = calculateRoomRentTotal(allocations.map(allocation => allocation.monthlyRentPaise));
   await db.update(rooms).set({ defaultRentPaise: totalRentPaise }).where(and(eq(rooms.id, input.roomId), eq(rooms.buildingId, input.buildingId)));
   return totalRentPaise;
@@ -738,12 +747,13 @@ async function syncRoomRentTotal(input: { buildingId: number; roomId: number }) 
 async function syncAutoGeneratedAllocationRent(input: { allocationId: number; buildingId: number; rentMonth: string; monthlyRentPaise: number }) {
   const db = await requireDb();
   const payment = (await db.select({ id: rentPayments.id, status: rentPayments.status, paidAmountPaise: rentPayments.paidAmountPaise, notes: rentPayments.notes }).from(rentPayments).where(and(eq(rentPayments.allocationId, input.allocationId), eq(rentPayments.buildingId, input.buildingId), eq(rentPayments.rentMonth, input.rentMonth))).limit(1))[0];
-  if (payment?.status === "pending" && payment.paidAmountPaise === 0 && payment.notes === "Auto-generated monthly rent cycle") {
-    await db.update(rentPayments).set({ expectedAmountPaise: input.monthlyRentPaise }).where(eq(rentPayments.id, payment.id));
+  if (payment) {
+    const status = deriveRentStatus(input.monthlyRentPaise, payment.paidAmountPaise);
+    await db.update(rentPayments).set({ expectedAmountPaise: input.monthlyRentPaise, status }).where(eq(rentPayments.id, payment.id));
   }
 }
 
-async function syncElectricityTenantCharges(input: { billId: number; buildingId: number; roomId: number; billingMonth: string; billAmountPaise: number; dueDate: string | null; notes: string | null; createdBy: number }) {
+async function syncElectricityTenantCharges(input: { billId: number; buildingId: number; roomId: number; billingMonth: string; billAmountPaise: number; paidAmountPaise?: number; paidOn?: string | null; paymentMethod?: "cash" | "upi" | "bank_transfer" | null; receiptUrl?: string | null; dueDate: string | null; notes: string | null; createdBy: number }) {
   const db = await requireDb();
   const monthStart = `${input.billingMonth}-01`;
   const room = (await db.select({ billingMode: rooms.billingMode }).from(rooms).where(and(eq(rooms.id, input.roomId), eq(rooms.buildingId, input.buildingId))).limit(1))[0];
@@ -758,6 +768,27 @@ async function syncElectricityTenantCharges(input: { billId: number; buildingId:
     return;
   }
   await syncTenantCharges({ buildingId: input.buildingId, roomId: input.roomId, tenantId: null, liabilityMode: "room_shared", sourceType: "electricity", sourceId: input.billId, billingMonth: input.billingMonth, title: `Electricity · ${input.billingMonth}`, amountPaise: input.billAmountPaise, dueDate: input.dueDate, notes: input.notes, createdBy: input.createdBy, recipientTenantIds: allocationIds });
+  if (input.paidAmountPaise !== undefined) {
+    const charges = await db.select().from(tenantCharges).where(and(eq(tenantCharges.sourceType, "electricity"), eq(tenantCharges.sourceId, input.billId), eq(tenantCharges.buildingId, input.buildingId)));
+    const currentPaidSum = charges.reduce((sum, item) => sum + item.paidAmountPaise, 0);
+    if (charges.length > 0 && currentPaidSum !== input.paidAmountPaise) {
+      let remainingPaid = Math.max(0, input.paidAmountPaise);
+      for (let i = 0; i < charges.length; i += 1) {
+        const charge = charges[i]!;
+        const isLast = i === charges.length - 1;
+        const sharePaid = isLast ? Math.min(remainingPaid, charge.expectedAmountPaise) : Math.min(remainingPaid, charge.expectedAmountPaise);
+        remainingPaid = Math.max(0, remainingPaid - sharePaid);
+        const shareStatus = deriveTenantChargeStatus(charge.expectedAmountPaise, sharePaid);
+        await db.update(tenantCharges).set({
+          paidAmountPaise: sharePaid,
+          status: shareStatus,
+          paidOn: shareStatus === "pending" ? null : (input.paidOn ?? charge.paidOn ?? new Date().toISOString().slice(0, 10)),
+          paymentMethod: shareStatus === "pending" ? null : (input.paymentMethod ?? charge.paymentMethod ?? "upi"),
+          receiptUrl: input.receiptUrl ?? charge.receiptUrl ?? null,
+        }).where(eq(tenantCharges.id, charge.id));
+      }
+    }
+  }
 }
 
 export async function upsertUser(user: InsertUser): Promise<void> {
@@ -788,15 +819,31 @@ export async function getUserByOpenId(openId: string) {
 }
 
 export async function getUserById(id: number) {
-  const db = await getDb();
+  let db = await getDb();
   if (!db) return undefined;
-  return (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+  try {
+    return (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+  } catch (error) {
+    if (String(error).includes("Aborted")) {
+      db = await resetEmbeddedDatabase();
+      return (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+    }
+    throw error;
+  }
 }
 
 export async function getUserByPhone(phone: string) {
-  const db = await getDb();
+  let db = await getDb();
   if (!db) return undefined;
-  return (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+  try {
+    return (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+  } catch (error) {
+    if (String(error).includes("Aborted")) {
+      db = await resetEmbeddedDatabase();
+      return (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+    }
+    throw error;
+  }
 }
 
 export async function getBuildingForUser(buildingId: number, userId: number, role: AppRole) {
@@ -1285,7 +1332,7 @@ export async function recordElectricityBill(input: { buildingId: number; roomId:
   });
   const bill = (await db.select({ id: electricityBills.id }).from(electricityBills).where(and(eq(electricityBills.roomId, input.roomId), eq(electricityBills.billingMonth, input.billingMonth))).limit(1))[0];
   if (!bill) throw new Error("Electricity bill was not saved.");
-  await syncElectricityTenantCharges({ billId: bill.id, buildingId: input.buildingId, roomId: input.roomId, billingMonth: input.billingMonth, billAmountPaise: input.billAmountPaise, dueDate: input.dueDate, notes: input.notes, createdBy: input.recordedBy });
+  await syncElectricityTenantCharges({ billId: bill.id, buildingId: input.buildingId, roomId: input.roomId, billingMonth: input.billingMonth, billAmountPaise: input.billAmountPaise, paidAmountPaise: input.paidAmountPaise, paidOn: input.paidOn, paymentMethod: input.paymentMethod, receiptUrl: input.receiptUrl, dueDate: input.dueDate, notes: input.notes, createdBy: input.recordedBy });
   if (input.status === "paid") await resolveManagerCollectionNotifications(input.buildingId, [`electricity-upcoming-${bill.id}`, `electricity-overdue-${bill.id}`]);
 }
 
@@ -1294,7 +1341,7 @@ export async function updateElectricityBill(input: { id: number; buildingId: num
   const bill = (await db.select({ roomId: electricityBills.roomId, billingMonth: electricityBills.billingMonth }).from(electricityBills).where(and(eq(electricityBills.id, input.id), eq(electricityBills.buildingId, input.buildingId))).limit(1))[0];
   const result = await db.update(electricityBills).set({ previousReading: input.previousReading, currentReading: input.currentReading, unitsConsumed: input.unitsConsumed, ratePerUnitPaise: input.ratePerUnitPaise, billAmountPaise: input.billAmountPaise, paidAmountPaise: input.paidAmountPaise, status: input.status, paidOn: input.paidOn, paymentMethod: input.paymentMethod, dueDate: input.dueDate, notes: input.notes, meterImageUrl: input.meterImageUrl, receiptUrl: input.receiptUrl, recordedBy: input.recordedBy }).where(and(eq(electricityBills.id, input.id), eq(electricityBills.buildingId, input.buildingId), eq(electricityBills.updatedAt, input.expectedUpdatedAt))).returning({ id: electricityBills.id });
   if (result.length !== 1) throw new Error("This electricity record changed on another device. Review the latest record before saving again.");
-  if (bill) await syncElectricityTenantCharges({ billId: input.id, buildingId: input.buildingId, roomId: bill.roomId, billingMonth: bill.billingMonth, billAmountPaise: input.billAmountPaise, dueDate: input.dueDate, notes: input.notes, createdBy: input.recordedBy });
+  if (bill) await syncElectricityTenantCharges({ billId: input.id, buildingId: input.buildingId, roomId: bill.roomId, billingMonth: bill.billingMonth, billAmountPaise: input.billAmountPaise, paidAmountPaise: input.paidAmountPaise, paidOn: input.paidOn, paymentMethod: input.paymentMethod, receiptUrl: input.receiptUrl, dueDate: input.dueDate, notes: input.notes, createdBy: input.recordedBy });
   if (input.status === "paid" && bill) {
     const room = (await db.select({ number: rooms.number }).from(rooms).where(and(eq(rooms.id, bill.roomId), eq(rooms.buildingId, input.buildingId))).limit(1))[0];
     const title = `Electricity due · Room ${room?.number ?? bill.roomId} · ${bill.billingMonth}`;
@@ -1720,8 +1767,10 @@ export async function getDashboardOverview(buildingId: number, totalBuildings: n
   const ownerSettlementExpectedPaise = ownerSettlementRows.filter(settlement => matchesPeriod(settlement.billingMonth)).reduce((total, settlement) => total + settlement.expectedAmountPaise, 0);
   const ownerSettlementPaidPaise = ownerSettlementRows.filter(settlement => matchesPeriod(settlement.billingMonth)).reduce((total, settlement) => total + settlement.paidAmountPaise, 0);
   const electricityTenantCharges = snapshot.tenantCharges.filter(charge => charge.sourceType === "electricity" && charge.billingMonth !== null && matchesPeriod(charge.billingMonth));
-  const electricityCollectionExpectedPaise = electricityTenantCharges.reduce((total, charge) => total + charge.expectedAmountPaise, 0);
-  const electricityCollectionPaidPaise = electricityTenantCharges.reduce((total, charge) => total + charge.paidAmountPaise, 0);
+  const electricityChargeBillIds = new Set(electricityTenantCharges.map(charge => charge.sourceId));
+  const unsplitElectricityBills = snapshot.electricity.filter(bill => matchesPeriod(bill.billingMonth) && !electricityChargeBillIds.has(bill.id));
+  const electricityCollectionExpectedPaise = electricityTenantCharges.reduce((total, charge) => total + charge.expectedAmountPaise, 0) + unsplitElectricityBills.reduce((total, bill) => total + bill.billAmountPaise, 0);
+  const electricityCollectionPaidPaise = electricityTenantCharges.reduce((total, charge) => total + charge.paidAmountPaise, 0) + unsplitElectricityBills.reduce((total, bill) => total + bill.paidAmountPaise, 0);
   const electricityCollectionPendingPaise = Math.max(electricityCollectionExpectedPaise - electricityCollectionPaidPaise, 0);
   const periodTenantCharges = snapshot.tenantCharges.filter(charge => charge.sourceType !== "electricity" && charge.billingMonth !== null && matchesPeriod(charge.billingMonth));
   const periodTenantChargeExpectedPaise = periodTenantCharges.reduce((total, charge) => total + charge.expectedAmountPaise, 0);

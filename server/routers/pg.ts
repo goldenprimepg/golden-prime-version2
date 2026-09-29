@@ -485,7 +485,7 @@ export const pgRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable." });
       const allocation = (await db.select().from(roomAllocations).where(and(eq(roomAllocations.id, input.allocationId), eq(roomAllocations.buildingId, input.buildingId), eq(roomAllocations.tenantId, input.tenantId), eq(roomAllocations.status, "active"))).limit(1))[0];
       if (!allocation) throw new TRPCError({ code: "BAD_REQUEST", message: "Choose an active allocation from the selected building." });
-      const expectedAmountPaise = allocation.monthlyRentPaise;
+      const expectedAmountPaise = input.expectedAmountPaise > 0 ? input.expectedAmountPaise : allocation.monthlyRentPaise;
       const status = deriveRentStatus(expectedAmountPaise, input.paidAmountPaise);
       await recordRentPayment({ ...input, expectedAmountPaise, status, paidOn: status === "pending" ? null : input.paidOn ?? new Date().toISOString().slice(0, 10), paymentMethod: status === "pending" ? null : input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, recordedBy: ctx.user.id });
       return { status, ownerAlertSent: false };
@@ -536,11 +536,13 @@ export const pgRouter = router({
   }),
 
   electricity: router({
-    upsert: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), roomId: z.number().int().positive(), billingMonth: monthString, previousReading: z.number().int().min(0), currentReading: z.number().int().min(0), dueDate: optionalDateString, notes: z.string().trim().max(800).optional(), meterImageUrl: optionalStoredImageUrl })).mutation(async ({ ctx, input }) => {
+    upsert: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), roomId: z.number().int().positive(), billingMonth: monthString, previousReading: z.number().int().min(0), currentReading: z.number().int().min(0), paidAmountPaise: z.number().int().min(0).optional(), paidOn: optionalDateString, paymentMethod: z.enum(["cash", "upi", "bank_transfer"]).optional(), dueDate: optionalDateString, notes: z.string().trim().max(800).optional(), meterImageUrl: optionalStoredImageUrl, receiptUrl: optionalStoredImageUrl })).mutation(async ({ ctx, input }) => {
       const building = await requireBuildingAccess(ctx.user, input.buildingId, "manageElectricity");
       const calculation = calculateElectricityBill(input.previousReading, input.currentReading, building.electricityRatePaise);
-      await recordElectricityBill({ ...input, ...calculation, paidAmountPaise: 0, status: "pending", paidOn: null, paymentMethod: null, ratePerUnitPaise: building.electricityRatePaise, dueDate: input.dueDate ?? null, notes: input.notes || null, meterImageUrl: input.meterImageUrl || null, receiptUrl: null, recordedBy: ctx.user.id });
-      return calculation;
+      const paidAmountPaise = input.paidAmountPaise ?? 0;
+      const status = deriveRentStatus(calculation.billAmountPaise, paidAmountPaise);
+      await recordElectricityBill({ ...input, ...calculation, paidAmountPaise, status, paidOn: status === "pending" ? null : input.paidOn ?? new Date().toISOString().slice(0, 10), paymentMethod: status === "pending" ? null : input.paymentMethod ?? null, ratePerUnitPaise: building.electricityRatePaise, dueDate: input.dueDate ?? null, notes: input.notes || null, meterImageUrl: input.meterImageUrl || null, receiptUrl: input.receiptUrl || null, recordedBy: ctx.user.id });
+      return { ...calculation, status };
     }),
     update: protectedProcedure.input(z.object({ id: z.number().int().positive(), buildingId: z.number().int().positive(), expectedUpdatedAt: z.date(), previousReading: z.number().int().min(0), currentReading: z.number().int().min(0), paidAmountPaise: z.number().int().min(0), paidOn: optionalDateString, paymentMethod: z.enum(["cash", "upi", "bank_transfer"]).optional(), meterImageUrl: optionalStoredImageUrl, receiptUrl: optionalStoredImageUrl, dueDate: optionalDateString, notes: z.string().trim().max(800).optional() })).mutation(async ({ ctx, input }) => {
       const building = await requireBuildingAccess(ctx.user, input.buildingId, "manageElectricity");
