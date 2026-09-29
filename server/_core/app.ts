@@ -12,10 +12,20 @@ export function createApp() {
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
-  app.post("/api/scheduled/rent-overdue-alerts", sendOverdueRentAlerts);
+  app.post(["/api/scheduled/rent-overdue-alerts", "/scheduled/rent-overdue-alerts"], sendOverdueRentAlerts);
   app.use(
-    "/api/trpc",
+    ["/api/trpc", "/trpc"],
     createExpressMiddleware({ router: appRouter, createContext }),
   );
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error("Express API error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: {
+          message: err instanceof Error ? err.message : "Internal server error",
+        },
+      });
+    }
+  });
   return app;
 }

@@ -36,11 +36,19 @@ const trpcClient = trpc.createClient({
           headers.set("x-session-token", storedToken);
         }
       }
-      const response = await globalThis.fetch(input, {
-        ...(init ?? {}),
-        headers,
-        credentials: "include",
-      });
+      const executeFetch = () =>
+        globalThis.fetch(input, {
+          ...(init ?? {}),
+          headers,
+          credentials: "include",
+        });
+      let response = await executeFetch();
+      let text = await response.clone().text();
+      if (!text.trim() && response.status >= 500) {
+        await new Promise(resolve => setTimeout(resolve, 400));
+        response = await executeFetch();
+        text = await response.clone().text();
+      }
       if (response.status > 0 && response.status < 500) {
         markServerReachable();
       }
@@ -53,6 +61,21 @@ const trpcClient = trpc.createClient({
             window.localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
           }
         }
+      }
+      if (!text.trim()) {
+        const fallbackPayload = [{
+          error: {
+            json: {
+              message: "Server is warming up. Please try signing in again in a moment.",
+              code: -32603,
+              data: { code: "INTERNAL_SERVER_ERROR", httpStatus: response.status || 503 },
+            },
+          },
+        }];
+        return new Response(JSON.stringify(fallbackPayload), {
+          status: response.status >= 400 ? response.status : 503,
+          headers: { "content-type": "application/json" },
+        });
       }
       return response;
     },

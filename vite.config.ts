@@ -1,6 +1,7 @@
 import { jsxLocPlugin } from "@builder.io/vite-plugin-jsx-loc";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { build as esbuild } from "esbuild";
 import fs from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
@@ -151,10 +152,32 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
+function vitePluginBundleServerlessApi(): Plugin {
+  return {
+    name: "bundle-serverless-api",
+    apply: "build",
+    async closeBundle() {
+      const schemaSql = fs.readFileSync(path.resolve(PROJECT_ROOT, "supabase", "schema.sql"), "utf8");
+      await esbuild({
+        entryPoints: [path.resolve(PROJECT_ROOT, "server", "_core", "app.ts")],
+        outfile: path.resolve(PROJECT_ROOT, "api", "_server_app.js"),
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        packages: "external",
+        define: {
+          __EMBEDDED_SCHEMA_SQL__: JSON.stringify(schemaSql),
+        },
+      });
+    },
+  };
+}
+
 const plugins = [
   react(),
   tailwindcss(),
   jsxLocPlugin(),
+  vitePluginBundleServerlessApi(),
   VitePWA({
     injectRegister: false,
     registerType: "prompt",

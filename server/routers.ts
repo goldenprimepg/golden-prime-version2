@@ -1,4 +1,4 @@
-import { COOKIE_NAME } from "@shared/const";
+import { COOKIE_NAME } from "../shared/const";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
 import { authenticatePhonePassword, clearPhoneSessionCookie, createPhoneSession, setPhoneSessionCookie, toSafeUser } from "./auth";

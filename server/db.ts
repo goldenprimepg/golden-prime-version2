@@ -56,13 +56,21 @@ export function isEmbeddedDatabaseActive() {
   return usingEmbeddedFallback || !getExternalConnectionString();
 }
 
+declare const __EMBEDDED_SCHEMA_SQL__: string | undefined;
+
+const cachedPasswordHashes = new Map<string, string>();
 function hashSeedPassword(password: string) {
+  const existing = cachedPasswordHashes.get(password);
+  if (existing) return existing;
   const salt = randomBytes(16).toString("hex");
   const derived = scryptSync(password, salt, 64).toString("hex");
-  return `${salt}:${derived}`;
+  const hashed = `${salt}:${derived}`;
+  cachedPasswordHashes.set(password, hashed);
+  return hashed;
 }
 
 async function ensureCoreSeedAccounts(db: DatabaseConnection) {
+  const defaultTenantHash = hashSeedPassword("GoldenPrime2026");
   const coreAccounts: Array<typeof users.$inferInsert> = [
     {
       openId: "seed-owner-kapil",
@@ -105,7 +113,7 @@ async function ensureCoreSeedAccounts(db: DatabaseConnection) {
       name: "Nimmi",
       email: "nimmi@goldenprimepg.com",
       phone: "9000000301",
-      passwordHash: hashSeedPassword("GoldenPrime2026"),
+      passwordHash: defaultTenantHash,
       loginMethod: "phone-password",
       role: "tenant",
     },
@@ -114,7 +122,7 @@ async function ensureCoreSeedAccounts(db: DatabaseConnection) {
       name: "Neelam",
       email: "neelam@goldenprimepg.com",
       phone: "9000000302",
-      passwordHash: hashSeedPassword("GoldenPrime2026"),
+      passwordHash: defaultTenantHash,
       loginMethod: "phone-password",
       role: "tenant",
     },
@@ -123,7 +131,7 @@ async function ensureCoreSeedAccounts(db: DatabaseConnection) {
       name: "Mansi",
       email: "mansi@goldenprimepg.com",
       phone: "9000000102",
-      passwordHash: hashSeedPassword("GoldenPrime2026"),
+      passwordHash: defaultTenantHash,
       loginMethod: "phone-password",
       role: "tenant",
     },
@@ -132,17 +140,16 @@ async function ensureCoreSeedAccounts(db: DatabaseConnection) {
       name: "Rahul",
       email: "rahul@goldenprimepg.com",
       phone: "9000000104",
-      passwordHash: hashSeedPassword("GoldenPrime2026"),
+      passwordHash: defaultTenantHash,
       loginMethod: "phone-password",
       role: "tenant",
     },
   ];
 
+  const existingUsers = await db.select({ id: users.id, openId: users.openId, phone: users.phone }).from(users);
   for (const account of coreAccounts) {
-    const existingByOpenId = (await db.select({ id: users.id }).from(users).where(eq(users.openId, account.openId)).limit(1))[0];
-    const existingByPhone = (await db.select({ id: users.id }).from(users).where(eq(users.phone, account.phone!)).limit(1))[0];
-    const targetId = existingByOpenId?.id ?? existingByPhone?.id;
-    if (targetId) {
+    const match = existingUsers.find(u => u.openId === account.openId || (account.phone && u.phone === account.phone));
+    if (match) {
       await db.update(users).set({
         name: account.name,
         email: account.email,
@@ -150,14 +157,14 @@ async function ensureCoreSeedAccounts(db: DatabaseConnection) {
         passwordHash: account.passwordHash,
         loginMethod: "phone-password",
         role: account.role,
-      }).where(eq(users.id, targetId));
+      }).where(eq(users.id, match.id));
     } else {
       await db.insert(users).values(account).onConflictDoNothing();
     }
   }
 }
 
-async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
+async function seedEmbeddedDatabase(db: DatabaseConnection, pglite?: PGlite) {
   const existingBuildings = await db.select({ id: buildings.id }).from(buildings).limit(1);
   if (existingBuildings.length > 0) {
     await ensureCoreSeedAccounts(db);
@@ -166,14 +173,16 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
 
   await ensureCoreSeedAccounts(db);
 
-  const owner = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9990636862")).limit(1))[0];
-  const manager = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "7668992940")).limit(1))[0];
-  const shashankUser = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "6307500844")).limit(1))[0];
-  const tanuUser = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "8081368879")).limit(1))[0];
-  const nimmiUser = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9000000301")).limit(1))[0];
-  const neelamUser = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9000000302")).limit(1))[0];
-  const mansiUser = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9000000102")).limit(1))[0];
-  const rahulUser = (await db.select({ id: users.id }).from(users).where(eq(users.phone, "9000000104")).limit(1))[0];
+  const allSeedUsers = await db.select({ id: users.id, phone: users.phone }).from(users);
+  const byPhone = new Map(allSeedUsers.map(u => [u.phone, u]));
+  const owner = byPhone.get("9990636862");
+  const manager = byPhone.get("7668992940");
+  const shashankUser = byPhone.get("6307500844");
+  const tanuUser = byPhone.get("8081368879");
+  const nimmiUser = byPhone.get("9000000301");
+  const neelamUser = byPhone.get("9000000302");
+  const mansiUser = byPhone.get("9000000102");
+  const rahulUser = byPhone.get("9000000104");
 
   if (!owner || !manager || !shashankUser || !tanuUser || !nimmiUser || !neelamUser || !mansiUser || !rahulUser) return;
 
@@ -218,7 +227,7 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
       billingMode: "equal_split",
       airConditioning: "non_ac",
       balcony: "balcony",
-      defaultRentPaise: 500_000, // ₹5,000 active allocation rent in triple sharing
+      defaultRentPaise: 500_000,
     },
     {
       buildingId: building.id,
@@ -229,7 +238,7 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
       billingMode: "equal_split",
       airConditioning: "non_ac",
       balcony: "balcony",
-      defaultRentPaise: 600_000, // ₹6,000 active allocation rent in double sharing
+      defaultRentPaise: 600_000,
     },
     {
       buildingId: building.id,
@@ -240,7 +249,7 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
       billingMode: "equal_split",
       airConditioning: "non_ac",
       balcony: "balcony",
-      defaultRentPaise: 1_200_000, // ₹12,000 total room rent (split ₹6,000 each)
+      defaultRentPaise: 1_200_000,
     },
     {
       buildingId: building.id,
@@ -251,7 +260,7 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
       billingMode: "primary_payer",
       airConditioning: "non_ac",
       balcony: "balcony",
-      defaultRentPaise: 1_300_000, // ₹13,000 co-living room rent
+      defaultRentPaise: 1_300_000,
     },
   ]).returning({ id: rooms.id, number: rooms.number });
 
@@ -311,37 +320,93 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
     },
   ]).returning({ id: tenants.id, fullName: tenants.fullName });
 
-  // 1. Room 302 (Third Floor): Shashank & Tanu co-living
-  // Shashank moved in 2025-11-10 (alone in double sharing @ ₹6,500/mo for Nov-Dec 2025),
-  // Tanu moved in 2026-01-10 (co-sharing @ ₹13,000/mo paid by Shashank + ₹500 cooler Apr-Sep 2026)
-  if (room302 && shashankTenant && tanuTenant) {
-    const [shashankAlloc] = await db.insert(roomAllocations).values({
-      buildingId: building.id,
-      roomId: room302.id,
-      tenantId: shashankTenant.id,
-      activeTenantId: shashankTenant.id,
-      moveInDate: "2025-11-10",
-      bedLabel: "Bed A",
-      isPrimaryPayer: "yes",
-      monthlyRentPaise: 1_300_000, // ₹13,000/month co-sharing rent paid by Shashank
-      depositPaise: 0,
-      status: "active",
-    }).returning({ id: roomAllocations.id });
+  const rentBatch: Array<typeof rentPayments.$inferInsert> = [];
+  const chargeBatch: Array<typeof tenantCharges.$inferInsert> = [];
 
-    await db.insert(roomAllocations).values({
-      buildingId: building.id,
-      roomId: room302.id,
-      tenantId: tanuTenant.id,
-      activeTenantId: tanuTenant.id,
-      moveInDate: "2026-01-10",
-      bedLabel: "Bed B",
-      isPrimaryPayer: "no",
-      monthlyRentPaise: 0, // Covered by primary payer Shashank in co-living Room 302
-      depositPaise: 0,
-      status: "active",
-    });
+  if (room302 && shashankTenant && tanuTenant && room301 && nimmiTenant && neelamTenant && room102 && mansiTenant && room104 && rahulTenant) {
+    const insertedAllocs = await db.insert(roomAllocations).values([
+      {
+        buildingId: building.id,
+        roomId: room302.id,
+        tenantId: shashankTenant.id,
+        activeTenantId: shashankTenant.id,
+        moveInDate: "2025-11-10",
+        bedLabel: "Bed A",
+        isPrimaryPayer: "yes",
+        monthlyRentPaise: 1_300_000,
+        depositPaise: 0,
+        status: "active",
+      },
+      {
+        buildingId: building.id,
+        roomId: room302.id,
+        tenantId: tanuTenant.id,
+        activeTenantId: tanuTenant.id,
+        moveInDate: "2026-01-10",
+        bedLabel: "Bed B",
+        isPrimaryPayer: "no",
+        monthlyRentPaise: 0,
+        depositPaise: 0,
+        status: "active",
+      },
+      {
+        buildingId: building.id,
+        roomId: room301.id,
+        tenantId: nimmiTenant.id,
+        activeTenantId: nimmiTenant.id,
+        moveInDate: "2026-02-01",
+        bedLabel: "Bed A",
+        isPrimaryPayer: "no",
+        monthlyRentPaise: 600_000,
+        depositPaise: 0,
+        status: "active",
+      },
+      {
+        buildingId: building.id,
+        roomId: room301.id,
+        tenantId: neelamTenant.id,
+        activeTenantId: neelamTenant.id,
+        moveInDate: "2026-08-01",
+        bedLabel: "Bed B",
+        isPrimaryPayer: "no",
+        monthlyRentPaise: 600_000,
+        depositPaise: 0,
+        status: "active",
+      },
+      {
+        buildingId: building.id,
+        roomId: room102.id,
+        tenantId: mansiTenant.id,
+        activeTenantId: mansiTenant.id,
+        moveInDate: "2026-01-01",
+        bedLabel: "Bed A",
+        isPrimaryPayer: "no",
+        monthlyRentPaise: 500_000,
+        depositPaise: 0,
+        status: "active",
+      },
+      {
+        buildingId: building.id,
+        roomId: room104.id,
+        tenantId: rahulTenant.id,
+        activeTenantId: rahulTenant.id,
+        moveInDate: "2026-03-01",
+        bedLabel: "Bed A",
+        isPrimaryPayer: "no",
+        monthlyRentPaise: 600_000,
+        depositPaise: 0,
+        status: "active",
+      },
+    ]).returning({ id: roomAllocations.id, tenantId: roomAllocations.tenantId });
 
-    if (shashankAlloc) {
+    const allocByTenant = new Map(insertedAllocs.map(a => [a.tenantId, a.id]));
+    const shashankAllocId = allocByTenant.get(shashankTenant.id);
+    const nimmiAllocId = allocByTenant.get(nimmiTenant.id);
+    const neelamAllocId = allocByTenant.get(neelamTenant.id);
+    const mansiAllocId = allocByTenant.get(mansiTenant.id);
+    const rahulAllocId = allocByTenant.get(rahulTenant.id);
+
+    if (shashankAllocId) {
       const shashankRentMonths: Array<{ month: string; amountPaise: number; note: string }> = [
         { month: "2025-11", amountPaise: 650_000, note: "Moved in 10 Nov 2025 · Single occupant in double sharing (₹6,500/month)" },
         { month: "2025-12", amountPaise: 650_000, note: "Single occupant in double sharing (₹6,500/month)" },
@@ -357,9 +422,9 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
       ];
       for (const item of shashankRentMonths) {
         const due = getRentDueDate(item.month, 5);
-        await db.insert(rentPayments).values({
+        rentBatch.push({
           buildingId: building.id,
-          allocationId: shashankAlloc.id,
+          allocationId: shashankAllocId,
           tenantId: shashankTenant.id,
           rentMonth: item.month,
           dueDate: due,
@@ -374,21 +439,103 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
       }
     }
 
-    // Extra ₹500 cooler charges for Shashank from April 2026 to Sep 2026 (paid)
-    const [shashankCoolerService] = await db.insert(tenantServices).values({
-      buildingId: building.id,
-      tenantId: shashankTenant.id,
-      serviceType: "other",
-      monthlyChargePaise: 50_000, // ₹500
-      active: "active",
-      notes: "Cooler charge (₹500/month · Apr 2026 to Sep 2026)",
-      createdBy: manager.id,
-    }).returning({ id: tenantServices.id });
+    if (nimmiAllocId) {
+      for (const month of ["2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
+        rentBatch.push({
+          buildingId: building.id,
+          allocationId: nimmiAllocId,
+          tenantId: nimmiTenant.id,
+          rentMonth: month,
+          dueDate: getRentDueDate(month, 5),
+          expectedAmountPaise: 600_000,
+          paidAmountPaise: 0,
+          status: "pending",
+          notes: "Room 301 double sharing split rent (₹12,000 total / 2 = ₹6,000)",
+          recordedBy: manager.id,
+        });
+      }
+    }
 
-    if (shashankCoolerService) {
-      for (const coolerMonth of ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
-        const due = getRentDueDate(coolerMonth, 5);
-        await db.insert(tenantCharges).values({
+    if (neelamAllocId) {
+      for (const month of ["2026-08", "2026-09"]) {
+        rentBatch.push({
+          buildingId: building.id,
+          allocationId: neelamAllocId,
+          tenantId: neelamTenant.id,
+          rentMonth: month,
+          dueDate: getRentDueDate(month, 5),
+          expectedAmountPaise: 600_000,
+          paidAmountPaise: 0,
+          status: "pending",
+          notes: "Room 301 double sharing split rent (₹12,000 total / 2 = ₹6,000)",
+          recordedBy: manager.id,
+        });
+      }
+    }
+
+    if (mansiAllocId) {
+      for (const month of ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
+        rentBatch.push({
+          buildingId: building.id,
+          allocationId: mansiAllocId,
+          tenantId: mansiTenant.id,
+          rentMonth: month,
+          dueDate: getRentDueDate(month, 5),
+          expectedAmountPaise: 500_000,
+          paidAmountPaise: 0,
+          status: "pending",
+          notes: "Room 102 triple sharing rent (₹5,000/month)",
+          recordedBy: manager.id,
+        });
+      }
+    }
+
+    if (rahulAllocId) {
+      for (const month of ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
+        rentBatch.push({
+          buildingId: building.id,
+          allocationId: rahulAllocId,
+          tenantId: rahulTenant.id,
+          rentMonth: month,
+          dueDate: getRentDueDate(month, 5),
+          expectedAmountPaise: 600_000,
+          paidAmountPaise: 0,
+          status: "pending",
+          notes: "Room 104 double sharing rent (₹6,000/month)",
+          recordedBy: manager.id,
+        });
+      }
+    }
+
+    if (rentBatch.length > 0) {
+      await db.insert(rentPayments).values(rentBatch);
+    }
+
+    const [shashankCoolerService, rahulCoolerService] = await db.insert(tenantServices).values([
+      {
+        buildingId: building.id,
+        tenantId: shashankTenant.id,
+        serviceType: "other",
+        monthlyChargePaise: 50_000,
+        active: "active",
+        notes: "Cooler charge (₹500/month · Apr 2026 to Sep 2026)",
+        createdBy: manager.id,
+      },
+      {
+        buildingId: building.id,
+        tenantId: rahulTenant.id,
+        serviceType: "other",
+        monthlyChargePaise: 25_000,
+        active: "active",
+        notes: "Extra split cooler service (₹250/month · Apr 2026 to Sep 2026)",
+        createdBy: manager.id,
+      },
+    ]).returning({ id: tenantServices.id });
+
+    for (const coolerMonth of ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
+      const due = getRentDueDate(coolerMonth, 5);
+      if (shashankCoolerService) {
+        chargeBatch.push({
           buildingId: building.id,
           tenantId: shashankTenant.id,
           roomId: room302.id,
@@ -406,192 +553,8 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
           createdBy: manager.id,
         });
       }
-    }
-
-    // Room 302 Electricity Bill for August 2026 ONLY:
-    // August consumption = 181 units (Total meter reading 672, last paid July meter reading 491) @ ₹12/unit = ₹2,172
-    const [augBill] = await db.insert(electricityBills).values({
-      buildingId: building.id,
-      roomId: room302.id,
-      billingMonth: "2026-08",
-      previousReading: 491,
-      currentReading: 672,
-      unitsConsumed: 181,
-      ratePerUnitPaise: 1200,
-      billAmountPaise: 217_200, // 181 * ₹12 = ₹2,172
-      paidAmountPaise: 0,
-      status: "pending",
-      dueDate: "2026-09-05",
-      notes: "August reading: 181 units (Total meter reading 672 [Direct + Inverter], last paid July reading 491)",
-      recordedBy: manager.id,
-    }).returning({ id: electricityBills.id });
-
-    if (augBill) {
-      await db.insert(tenantCharges).values({
-        buildingId: building.id,
-        tenantId: shashankTenant.id,
-        roomId: room302.id,
-        sourceType: "electricity",
-        sourceId: augBill.id,
-        billingMonth: "2026-08",
-        title: "Electricity · 2026-08",
-        expectedAmountPaise: 217_200,
-        paidAmountPaise: 0,
-        status: "pending",
-        dueDate: "2026-09-05",
-        notes: "August reading: 181 units (Total meter reading 672 [Direct + Inverter], last paid July reading 491)",
-        createdBy: manager.id,
-      });
-    }
-  }
-
-  // 2. Room 301 (Third Floor): Nimmi & Neelam in double sharing (splitting ₹12,000 total rent = ₹6,000 each, and electric bill)
-  // Nimmi moves in Feb 2026; Neelam moves in Aug 2026
-  if (room301 && nimmiTenant && neelamTenant) {
-    const [nimmiAlloc] = await db.insert(roomAllocations).values({
-      buildingId: building.id,
-      roomId: room301.id,
-      tenantId: nimmiTenant.id,
-      activeTenantId: nimmiTenant.id,
-      moveInDate: "2026-02-01",
-      bedLabel: "Bed A",
-      isPrimaryPayer: "no",
-      monthlyRentPaise: 600_000, // ₹6,000 (half of ₹12,000 total room 301 rent)
-      depositPaise: 0,
-      status: "active",
-    }).returning({ id: roomAllocations.id });
-
-    const [neelamAlloc] = await db.insert(roomAllocations).values({
-      buildingId: building.id,
-      roomId: room301.id,
-      tenantId: neelamTenant.id,
-      activeTenantId: neelamTenant.id,
-      moveInDate: "2026-08-01",
-      bedLabel: "Bed B",
-      isPrimaryPayer: "no",
-      monthlyRentPaise: 600_000, // ₹6,000 (half of ₹12,000 total room 301 rent)
-      depositPaise: 0,
-      status: "active",
-    }).returning({ id: roomAllocations.id });
-
-    if (nimmiAlloc) {
-      for (const month of ["2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
-        const due = getRentDueDate(month, 5);
-        await db.insert(rentPayments).values({
-          buildingId: building.id,
-          allocationId: nimmiAlloc.id,
-          tenantId: nimmiTenant.id,
-          rentMonth: month,
-          dueDate: due,
-          expectedAmountPaise: 600_000,
-          paidAmountPaise: 0,
-          status: "pending",
-          notes: "Room 301 double sharing split rent (₹12,000 total / 2 = ₹6,000)",
-          recordedBy: manager.id,
-        });
-      }
-    }
-
-    if (neelamAlloc) {
-      for (const month of ["2026-08", "2026-09"]) {
-        const due = getRentDueDate(month, 5);
-        await db.insert(rentPayments).values({
-          buildingId: building.id,
-          allocationId: neelamAlloc.id,
-          tenantId: neelamTenant.id,
-          rentMonth: month,
-          dueDate: due,
-          expectedAmountPaise: 600_000,
-          paidAmountPaise: 0,
-          status: "pending",
-          notes: "Room 301 double sharing split rent (₹12,000 total / 2 = ₹6,000)",
-          recordedBy: manager.id,
-        });
-      }
-    }
-  }
-
-  // 3. Room 102 (First Floor): Mansi in triple sharing paying ₹5,000 rent, moves in Jan 2026
-  if (room102 && mansiTenant) {
-    const [mansiAlloc] = await db.insert(roomAllocations).values({
-      buildingId: building.id,
-      roomId: room102.id,
-      tenantId: mansiTenant.id,
-      activeTenantId: mansiTenant.id,
-      moveInDate: "2026-01-01",
-      bedLabel: "Bed A",
-      isPrimaryPayer: "no",
-      monthlyRentPaise: 500_000, // ₹5,000
-      depositPaise: 0,
-      status: "active",
-    }).returning({ id: roomAllocations.id });
-
-    if (mansiAlloc) {
-      for (const month of ["2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
-        const due = getRentDueDate(month, 5);
-        await db.insert(rentPayments).values({
-          buildingId: building.id,
-          allocationId: mansiAlloc.id,
-          tenantId: mansiTenant.id,
-          rentMonth: month,
-          dueDate: due,
-          expectedAmountPaise: 500_000,
-          paidAmountPaise: 0,
-          status: "pending",
-          notes: "Room 102 triple sharing rent (₹5,000/month)",
-          recordedBy: manager.id,
-        });
-      }
-    }
-  }
-
-  // 4. Room 104 (First Floor): Rahul in double sharing paying ₹6,000 rent + ₹250 split cooler service (Apr 2026 to Sep 2026), moves in March 2026
-  if (room104 && rahulTenant) {
-    const [rahulAlloc] = await db.insert(roomAllocations).values({
-      buildingId: building.id,
-      roomId: room104.id,
-      tenantId: rahulTenant.id,
-      activeTenantId: rahulTenant.id,
-      moveInDate: "2026-03-01",
-      bedLabel: "Bed A",
-      isPrimaryPayer: "no",
-      monthlyRentPaise: 600_000, // ₹6,000
-      depositPaise: 0,
-      status: "active",
-    }).returning({ id: roomAllocations.id });
-
-    if (rahulAlloc) {
-      for (const month of ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
-        const due = getRentDueDate(month, 5);
-        await db.insert(rentPayments).values({
-          buildingId: building.id,
-          allocationId: rahulAlloc.id,
-          tenantId: rahulTenant.id,
-          rentMonth: month,
-          dueDate: due,
-          expectedAmountPaise: 600_000,
-          paidAmountPaise: 0,
-          status: "pending",
-          notes: "Room 104 double sharing rent (₹6,000/month)",
-          recordedBy: manager.id,
-        });
-      }
-    }
-
-    const [rahulCoolerService] = await db.insert(tenantServices).values({
-      buildingId: building.id,
-      tenantId: rahulTenant.id,
-      serviceType: "other",
-      monthlyChargePaise: 25_000, // ₹250
-      active: "active",
-      notes: "Extra split cooler service (₹250/month · Apr 2026 to Sep 2026)",
-      createdBy: manager.id,
-    }).returning({ id: tenantServices.id });
-
-    if (rahulCoolerService) {
-      for (const coolerMonth of ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
-        const due = getRentDueDate(coolerMonth, 5);
-        await db.insert(tenantCharges).values({
+      if (rahulCoolerService) {
+        chargeBatch.push({
           buildingId: building.id,
           tenantId: rahulTenant.id,
           roomId: room104.id,
@@ -608,22 +571,62 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite: PGlite) {
         });
       }
     }
+
+    const [augBill] = await db.insert(electricityBills).values({
+      buildingId: building.id,
+      roomId: room302.id,
+      billingMonth: "2026-08",
+      previousReading: 491,
+      currentReading: 672,
+      unitsConsumed: 181,
+      ratePerUnitPaise: 1200,
+      billAmountPaise: 217_200,
+      paidAmountPaise: 0,
+      status: "pending",
+      dueDate: "2026-09-05",
+      notes: "August reading: 181 units (Total meter reading 672 [Direct + Inverter], last paid July reading 491)",
+      recordedBy: manager.id,
+    }).returning({ id: electricityBills.id });
+
+    if (augBill) {
+      chargeBatch.push({
+        buildingId: building.id,
+        tenantId: shashankTenant.id,
+        roomId: room302.id,
+        sourceType: "electricity",
+        sourceId: augBill.id,
+        billingMonth: "2026-08",
+        title: "Electricity · 2026-08",
+        expectedAmountPaise: 217_200,
+        paidAmountPaise: 0,
+        status: "pending",
+        dueDate: "2026-09-05",
+        notes: "August reading: 181 units (Total meter reading 672 [Direct + Inverter], last paid July reading 491)",
+        createdBy: manager.id,
+      });
+    }
+
+    if (chargeBatch.length > 0) {
+      await db.insert(tenantCharges).values(chargeBatch);
+    }
   }
 
-  await pglite.exec(`
-    SELECT setval(pg_get_serial_sequence('public.users', 'id'), COALESCE((SELECT MAX(id) FROM public.users), 1), EXISTS (SELECT 1 FROM public.users));
-    SELECT setval(pg_get_serial_sequence('public.buildings', 'id'), COALESCE((SELECT MAX(id) FROM public.buildings), 1), EXISTS (SELECT 1 FROM public.buildings));
-    SELECT setval(pg_get_serial_sequence('public."staffAssignments"', 'id'), COALESCE((SELECT MAX(id) FROM public."staffAssignments"), 1), EXISTS (SELECT 1 FROM public."staffAssignments"));
-    SELECT setval(pg_get_serial_sequence('public.floors', 'id'), COALESCE((SELECT MAX(id) FROM public.floors), 1), EXISTS (SELECT 1 FROM public.floors));
-    SELECT setval(pg_get_serial_sequence('public.rooms', 'id'), COALESCE((SELECT MAX(id) FROM public.rooms), 1), EXISTS (SELECT 1 FROM public.rooms));
-    SELECT setval(pg_get_serial_sequence('public.tenants', 'id'), COALESCE((SELECT MAX(id) FROM public.tenants), 1), EXISTS (SELECT 1 FROM public.tenants));
-    SELECT setval(pg_get_serial_sequence('public."roomAllocations"', 'id'), COALESCE((SELECT MAX(id) FROM public."roomAllocations"), 1), EXISTS (SELECT 1 FROM public."roomAllocations"));
-    SELECT setval(pg_get_serial_sequence('public."rentPayments"', 'id'), COALESCE((SELECT MAX(id) FROM public."rentPayments"), 1), EXISTS (SELECT 1 FROM public."rentPayments"));
-    SELECT setval(pg_get_serial_sequence('public."tenantServices"', 'id'), COALESCE((SELECT MAX(id) FROM public."tenantServices"), 1), EXISTS (SELECT 1 FROM public."tenantServices"));
-    SELECT setval(pg_get_serial_sequence('public."tenantCharges"', 'id'), COALESCE((SELECT MAX(id) FROM public."tenantCharges"), 1), EXISTS (SELECT 1 FROM public."tenantCharges"));
-    SELECT setval(pg_get_serial_sequence('public."electricityBills"', 'id'), COALESCE((SELECT MAX(id) FROM public."electricityBills"), 1), EXISTS (SELECT 1 FROM public."electricityBills"));
-    SELECT setval(pg_get_serial_sequence('public."ownerSettlements"', 'id'), COALESCE((SELECT MAX(id) FROM public."ownerSettlements"), 1), EXISTS (SELECT 1 FROM public."ownerSettlements"));
-  `);
+  if (pglite) {
+    await pglite.exec(`
+      SELECT setval(pg_get_serial_sequence('public.users', 'id'), COALESCE((SELECT MAX(id) FROM public.users), 1), EXISTS (SELECT 1 FROM public.users));
+      SELECT setval(pg_get_serial_sequence('public.buildings', 'id'), COALESCE((SELECT MAX(id) FROM public.buildings), 1), EXISTS (SELECT 1 FROM public.buildings));
+      SELECT setval(pg_get_serial_sequence('public."staffAssignments"', 'id'), COALESCE((SELECT MAX(id) FROM public."staffAssignments"), 1), EXISTS (SELECT 1 FROM public."staffAssignments"));
+      SELECT setval(pg_get_serial_sequence('public.floors', 'id'), COALESCE((SELECT MAX(id) FROM public.floors), 1), EXISTS (SELECT 1 FROM public.floors));
+      SELECT setval(pg_get_serial_sequence('public.rooms', 'id'), COALESCE((SELECT MAX(id) FROM public.rooms), 1), EXISTS (SELECT 1 FROM public.rooms));
+      SELECT setval(pg_get_serial_sequence('public.tenants', 'id'), COALESCE((SELECT MAX(id) FROM public.tenants), 1), EXISTS (SELECT 1 FROM public.tenants));
+      SELECT setval(pg_get_serial_sequence('public."roomAllocations"', 'id'), COALESCE((SELECT MAX(id) FROM public."roomAllocations"), 1), EXISTS (SELECT 1 FROM public."roomAllocations"));
+      SELECT setval(pg_get_serial_sequence('public."rentPayments"', 'id'), COALESCE((SELECT MAX(id) FROM public."rentPayments"), 1), EXISTS (SELECT 1 FROM public."rentPayments"));
+      SELECT setval(pg_get_serial_sequence('public."tenantServices"', 'id'), COALESCE((SELECT MAX(id) FROM public."tenantServices"), 1), EXISTS (SELECT 1 FROM public."tenantServices"));
+      SELECT setval(pg_get_serial_sequence('public."tenantCharges"', 'id'), COALESCE((SELECT MAX(id) FROM public."tenantCharges"), 1), EXISTS (SELECT 1 FROM public."tenantCharges"));
+      SELECT setval(pg_get_serial_sequence('public."electricityBills"', 'id'), COALESCE((SELECT MAX(id) FROM public."electricityBills"), 1), EXISTS (SELECT 1 FROM public."electricityBills"));
+      SELECT setval(pg_get_serial_sequence('public."ownerSettlements"', 'id'), COALESCE((SELECT MAX(id) FROM public."ownerSettlements"), 1), EXISTS (SELECT 1 FROM public."ownerSettlements"));
+    `);
+  }
 }
 
 let forceInMemoryEmbedded = false;
@@ -633,9 +636,9 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
 
   embeddedInitPromise = (async () => {
     try {
-      const dataDir = process.env.VITEST || forceInMemoryEmbedded
+      const dataDir = process.env.VITEST || process.env.VERCEL || forceInMemoryEmbedded
         ? undefined
-        : path.resolve(process.env.VERCEL ? "/tmp" : process.cwd(), ".pglite-golden-prime-v2");
+        : path.resolve(process.cwd(), ".pglite-golden-prime-v2");
       let pglite: PGlite;
       if (dataDir) {
         try {
@@ -652,9 +655,10 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
 
       const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
       if (!check.rows[0]?.reg) {
-        const schemaPath = path.resolve(process.cwd(), "supabase", "schema.sql");
-        const rawSchema = fs
-          .readFileSync(schemaPath, "utf8")
+        const rawSql = typeof __EMBEDDED_SCHEMA_SQL__ === "string" && __EMBEDDED_SCHEMA_SQL__.length > 0
+          ? __EMBEDDED_SCHEMA_SQL__
+          : fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
+        const rawSchema = rawSql
           .replace(/--> statement-breakpoint/g, "\n")
           .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
         await pglite.exec(rawSchema);
@@ -676,6 +680,7 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
 
 export async function resetEmbeddedDatabase(): Promise<DatabaseConnection> {
   cachedDb = null;
+  dbConnectPromise = null;
   embeddedInitPromise = null;
   usingEmbeddedFallback = true;
   forceInMemoryEmbedded = true;
@@ -716,42 +721,49 @@ export async function ensureEmbeddedLoginUser(phone: string, passwordHash: strin
   return created;
 }
 
+let dbConnectPromise: Promise<DatabaseConnection | null> | null = null;
+
 export async function getDb(): Promise<DatabaseConnection | null> {
   if (cachedDb) return cachedDb;
+  if (dbConnectPromise) return dbConnectPromise;
 
-  // Supabase remains the database provider, while Vercel's managed Postgres
-  // integration exposes the same pooled connection under POSTGRES_URL.
-  // Prefer the portable Supabase setting and fall back to Vercel's names so
-  // production mutations do not fail with a misleading unavailable error.
-  const connectionString = process.env.SUPABASE_DATABASE_URL
-    ?? process.env.POSTGRES_URL
-    ?? process.env.POSTGRES_PRISMA_URL
-    ?? process.env.POSTGRES_URL_NON_POOLING;
-  if (!connectionString || usingEmbeddedFallback) {
-    usingEmbeddedFallback = true;
-    return initEmbeddedPglite();
-  }
-  const configuredMax = Number(process.env.SUPABASE_POOL_MAX ?? 8);
-  const max = Number.isInteger(configuredMax) && configuredMax >= 2 && configuredMax <= 12 ? configuredMax : 8;
-  const pool = new Pool({
-    connectionString,
-    max,
-    connectionTimeoutMillis: 3_000,
-    idleTimeoutMillis: 30_000,
-    allowExitOnIdle: true,
-    ssl: { rejectUnauthorized: false },
-  });
-  try {
-    await pool.query("SELECT 1");
-    cachedPostgresPool = pool;
-    cachedDb = drizzlePostgres(cachedPostgresPool, { schema: postgresSchema });
-    await seedEmbeddedDatabase(cachedDb);
-    return cachedDb;
-  } catch {
-    await pool.end().catch(() => {});
-    usingEmbeddedFallback = true;
-    return initEmbeddedPglite();
-  }
+  dbConnectPromise = (async () => {
+    try {
+      const connectionString = process.env.SUPABASE_DATABASE_URL
+        ?? process.env.POSTGRES_URL
+        ?? process.env.POSTGRES_PRISMA_URL
+        ?? process.env.POSTGRES_URL_NON_POOLING;
+      if (!connectionString || usingEmbeddedFallback) {
+        usingEmbeddedFallback = true;
+        return await initEmbeddedPglite();
+      }
+      const configuredMax = Number(process.env.SUPABASE_POOL_MAX ?? 8);
+      const max = Number.isInteger(configuredMax) && configuredMax >= 2 && configuredMax <= 12 ? configuredMax : 8;
+      const pool = new Pool({
+        connectionString,
+        max,
+        connectionTimeoutMillis: 1_500,
+        idleTimeoutMillis: 30_000,
+        allowExitOnIdle: true,
+        ssl: { rejectUnauthorized: false },
+      });
+      try {
+        await pool.query("SELECT 1");
+        cachedPostgresPool = pool;
+        cachedDb = drizzlePostgres(cachedPostgresPool, { schema: postgresSchema });
+        await seedEmbeddedDatabase(cachedDb);
+        return cachedDb;
+      } catch {
+        await pool.end().catch(() => {});
+        usingEmbeddedFallback = true;
+        return await initEmbeddedPglite();
+      }
+    } finally {
+      dbConnectPromise = null;
+    }
+  })();
+
+  return dbConnectPromise;
 }
 
 async function requireDb() {
