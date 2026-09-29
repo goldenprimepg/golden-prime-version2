@@ -5759,6 +5759,33 @@ async function sendOverdueRentAlerts(req, res) {
 // server/_core/app.ts
 function createApp() {
   const app = express();
+  app.use((req, _res, next) => {
+    try {
+      const parsed = new URL(req.url || "/", "http://localhost");
+      const apiPath = parsed.searchParams.get("__api_path");
+      if (apiPath) {
+        parsed.searchParams.delete("__api_path");
+        const search = parsed.searchParams.toString();
+        req.url = `/api/${apiPath.replace(/^\/+/, "")}${search ? `?${search}` : ""}`;
+      } else if (req.url && !req.url.startsWith("/api/") && (req.url.startsWith("/trpc") || req.url.startsWith("/storage") || req.url.startsWith("/scheduled"))) {
+        req.url = `/api${req.url}`;
+      }
+    } catch {
+    }
+    if (req.body !== void 0 && req.body !== null && !req._body) {
+      if (Buffer.isBuffer(req.body) || typeof req.body === "string") {
+        const raw = req.body.toString("utf8").trim();
+        if (raw.startsWith("{") || raw.startsWith("[")) {
+          try {
+            req.body = JSON.parse(raw);
+          } catch {
+          }
+        }
+      }
+      req._body = true;
+    }
+    next();
+  });
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);

@@ -15,7 +15,10 @@ describe("Vercel deployment contract", () => {
     expect(config.buildCommand).toBe("npm run vercel:build");
     expect(config.outputDirectory).toBe("dist/public");
     expect(config.routes).toBeUndefined();
-    expect(config.rewrites).toEqual(expect.arrayContaining([expect.objectContaining({ source: "/(.*)", destination: "/index.html" })]));
+    expect(config.rewrites).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: "/api/(.*)", destination: "/api/index?__api_path=$1" }),
+      expect.objectContaining({ destination: "/index.html" }),
+    ]));
     expect(api).toContain('import { createApp } from "../server/_core/app"');
     expect(api).toContain("export default createApp()");
   });
