@@ -635,9 +635,20 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
     try {
       const dataDir = process.env.VITEST || forceInMemoryEmbedded
         ? undefined
-        : path.resolve(process.cwd(), ".pglite-golden-prime-v2");
-      const pglite = dataDir ? new PGlite(dataDir) : new PGlite();
-      await pglite.waitReady;
+        : path.resolve(process.env.VERCEL ? "/tmp" : process.cwd(), ".pglite-golden-prime-v2");
+      let pglite: PGlite;
+      if (dataDir) {
+        try {
+          pglite = new PGlite(dataDir);
+          await pglite.waitReady;
+        } catch {
+          pglite = new PGlite();
+          await pglite.waitReady;
+        }
+      } else {
+        pglite = new PGlite();
+        await pglite.waitReady;
+      }
 
       const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
       if (!check.rows[0]?.reg) {

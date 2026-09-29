@@ -1,6 +1,9 @@
 node_modules
 dist
 .manus-logs
+.pglite-golden-prime-v2
+.data
 .env
 .env.*
 !.env.example
+
