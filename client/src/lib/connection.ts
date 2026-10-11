@@ -69,11 +69,18 @@ export function useServerReachability() {
 }
 
 if (typeof window !== "undefined") {
-  window.addEventListener("online", () => void checkServerReachability());
-  window.addEventListener("focus", () => void checkServerReachability());
+  window.addEventListener("online", () => {
+    setReachable(true);
+    void checkServerReachability();
+  });
+  window.addEventListener("focus", () => {
+    if (!reachable) void checkServerReachability();
+  });
   window.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void checkServerReachability();
+    if (document.visibilityState === "visible" && !reachable) void checkServerReachability();
   });
   window.addEventListener("offline", () => setReachable(false));
-  void checkServerReachability();
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    setReachable(false);
+  }
 }

@@ -20,14 +20,14 @@ export default function Profit() {
   const [month, setMonth] = useState(monthNow);
   const [showSettlement, setShowSettlement] = useState(false);
   const [showGovernmentBill, setShowGovernmentBill] = useState(false);
-  const profit = trpc.pg.profit.get.useQuery({ buildingId: buildingId ?? 0, periodKey: month }, { enabled: Boolean(buildingId) });
+  const profit = trpc.pg.profit.get.useQuery({ buildingId: buildingId ?? 0, periodKey: month }, { enabled: Boolean(buildingId), placeholderData: prev => prev });
   const refresh = async () => { await Promise.all([utils.pg.profit.get.invalidate(), utils.pg.dashboard.get.invalidate(), utils.pg.operations.snapshot.invalidate()]); };
   const upload = trpc.pg.uploads.image.useMutation({ onError: error => toast.error(error.message) });
   const saveSettlement = trpc.pg.profit.saveOwnerSettlement.useMutation({ onSuccess: async () => { await refresh(); setShowSettlement(false); toast.success("Owner settlement saved"); }, onError: error => toast.error(error.message) });
   const deleteSettlement = trpc.pg.profit.deleteOwnerSettlement.useMutation({ onSuccess: async data => { await refresh(); setShowSettlement(false); deletionSafety.offerUndo({ auditId: data.auditId, buildingId: buildingId ?? 0, label: "Owner settlement", onRestored: refresh }); }, onError: error => toast.error(error.message) });
   const saveGovernmentBill = trpc.pg.profit.saveGovernmentElectricity.useMutation({ onSuccess: async () => { await refresh(); setShowGovernmentBill(false); toast.success("Building electricity bill saved"); }, onError: error => toast.error(error.message) });
   const deleteGovernmentBill = trpc.pg.profit.deleteGovernmentElectricity.useMutation({ onSuccess: async data => { await refresh(); setShowGovernmentBill(false); deletionSafety.offerUndo({ auditId: data.auditId, buildingId: buildingId ?? 0, label: "Building electricity bill", onRestored: refresh }); }, onError: error => toast.error(error.message) });
-  if (buildingsQuery.isLoading || profit.isLoading) return <LoadingState />;
+  if (buildingsQuery.isLoading || (profit.isLoading && !profit.data)) return <LoadingState />;
   if (!building || !buildingId || !profit.data) return <BuildingEmptyState />;
   const { summary, ownerSettlement, settlementHistory, governmentElectricity, governmentElectricityHistory } = profit.data;
   const governmentId = governmentElectricityHistory.find(item => item.billingMonth === month)?.id ?? null;

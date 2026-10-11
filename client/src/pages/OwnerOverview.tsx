@@ -21,7 +21,7 @@ export default function OwnerOverview() {
   const [reminderBuildingId, setReminderBuildingId] = useState<number | null>(null);
   const [showAccountForm, setShowAccountForm] = useState(false);
   const [showMotionPreferences, setShowMotionPreferences] = useState(false);
-  const overview = trpc.pg.owner.overview.useQuery({ periodKey: month }, { enabled: user?.role === "admin" });
+  const overview = trpc.pg.owner.overview.useQuery({ periodKey: month }, { enabled: user?.role === "admin", placeholderData: prev => prev });
   const refresh = async () => {
     await utils.pg.owner.overview.invalidate();
     await utils.pg.profit.get.invalidate();

@@ -7,6 +7,7 @@ import { PageHeader, PrimaryAction } from "@/components/PageHeader";
 import { formatCurrency, toPaise } from "@/lib/format";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { useActiveBuilding } from "@/hooks/useActiveBuilding";
 import { useDeletionSafety } from "@/components/DeletionSafety";
 import { UploadProgress } from "@/components/UploadProgress";
 import { useUploadFeedback } from "@/hooks/useUploadFeedback";
@@ -20,7 +21,7 @@ function fileToDataUrl(file: File) { return new Promise<string>((resolve, reject
 export default function Buildings() {
   const { user } = useAuth();
   const canManageBuildings = user?.role === "admin" || user?.role === "manager";
-  const buildings = trpc.pg.buildings.list.useQuery();
+  const { buildingsQuery:buildings } = useActiveBuilding();
   const utils = trpc.useUtils();
   const { requestDelete } = useDeletionSafety();
   const [showCreate, setShowCreate] = useState(false);

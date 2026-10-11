@@ -28,6 +28,7 @@ const BuildingWorkspaceContext = createContext<BuildingWorkspaceValue | null>(nu
 export function BuildingWorkspaceProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const { isReachable: isOnline } = useServerReachability();
+  const utils = trpc.useUtils();
   const liveBuildingsQuery = trpc.pg.buildings.list.useQuery(undefined, { ...liveQueryOptions, enabled: isOnline });
   const [buildingId, setBuildingIdState] = useState<number | null>(() => {
     const stored = Number(window.localStorage.getItem(STORAGE_KEY));
@@ -35,10 +36,11 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   });
   const offlineSnapshot = useMemo(() => user && buildingId ? loadOfflineWorkspaceSnapshot(user.id, buildingId) : null, [buildingId, isOnline, user]);
   const fallbackBuilding = offlineSnapshot?.building as BuildingOption | undefined;
+  const resolvedBuildings = liveBuildingsQuery.data ?? (fallbackBuilding ? [fallbackBuilding] : undefined);
   const buildingsQuery: WorkspaceQuery = useMemo(() => ({
-    data: liveBuildingsQuery.data ?? (fallbackBuilding ? [fallbackBuilding] : undefined),
-    isLoading: isOnline && liveBuildingsQuery.isLoading,
-  }), [fallbackBuilding, isOnline, liveBuildingsQuery.data, liveBuildingsQuery.isLoading]);
+    data: resolvedBuildings,
+    isLoading: !resolvedBuildings && isOnline && liveBuildingsQuery.isLoading,
+  }), [isOnline, liveBuildingsQuery.isLoading, resolvedBuildings]);
 
   useEffect(() => {
     if (buildingsQuery.isLoading) return;
@@ -63,11 +65,20 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   };
   const building = useMemo(() => buildingsQuery.data?.find(item => item.id === buildingId) ?? null, [buildingId, buildingsQuery.data]);
   const liveWorkspaceSnapshot = trpc.pg.operations.snapshot.useQuery({ buildingId: buildingId ?? 0 }, { enabled: Boolean(buildingId) && isOnline, ...liveQueryOptions });
-  const isRefreshing = liveBuildingsQuery.isFetching || liveWorkspaceSnapshot.isFetching;
+  const snapshotData = liveWorkspaceSnapshot.data ?? (offlineSnapshot?.data as WorkspaceSnapshotData | undefined);
+  const isRefreshing = !snapshotData && (liveBuildingsQuery.isFetching || liveWorkspaceSnapshot.isFetching);
   const snapshotQuery: WorkspaceSnapshotQuery = useMemo(() => ({
-    data: liveWorkspaceSnapshot.data ?? offlineSnapshot?.data as WorkspaceSnapshotData | undefined,
-    isLoading: (isOnline && liveWorkspaceSnapshot.isLoading) || !(liveWorkspaceSnapshot.data ?? offlineSnapshot?.data),
-  }) as WorkspaceSnapshotQuery, [isOnline, liveWorkspaceSnapshot, offlineSnapshot?.data]);
+    data: snapshotData as WorkspaceSnapshotData,
+    isLoading: !snapshotData && ((isOnline && liveWorkspaceSnapshot.isLoading) || !offlineSnapshot?.data),
+  }) as WorkspaceSnapshotQuery, [isOnline, liveWorkspaceSnapshot.isLoading, offlineSnapshot?.data, snapshotData]);
+
+  useEffect(() => {
+    if (!buildingId || !isOnline || user?.role !== "manager") return;
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    void utils.pg.dashboard.get.prefetch({ buildingId, periodMode: "monthly", periodKey: currentMonth });
+    void utils.pg.profit.get.prefetch({ buildingId, periodKey: currentMonth });
+    void utils.pg.notifications.list.prefetch({ buildingId });
+  }, [buildingId, isOnline, user?.role, utils]);
 
   useEffect(() => {
     if (!user || !building || !buildingId || !liveWorkspaceSnapshot.data) return;

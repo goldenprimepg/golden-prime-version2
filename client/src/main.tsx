@@ -8,7 +8,17 @@ import App from "./App";
 import "./index.css";
 
 const SESSION_TOKEN_STORAGE_KEY = "golden_prime_session_token";
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 60_000,
+      gcTime: 10 * 60_000,
+      refetchOnWindowFocus: false,
+      refetchOnMount: false,
+      retry: 1,
+    },
+  },
+});
 
 function redirectToPhoneLogin(error: unknown) {
   if (!(error instanceof TRPCClientError) || typeof window === "undefined") return;
@@ -43,12 +53,6 @@ const trpcClient = trpc.createClient({
           credentials: "include",
         });
       let response = await executeFetch();
-      let text = await response.clone().text();
-      if (!text.trim() && response.status >= 500) {
-        await new Promise(resolve => setTimeout(resolve, 400));
-        response = await executeFetch();
-        text = await response.clone().text();
-      }
       if (response.status > 0 && response.status < 500) {
         markServerReachable();
       }
@@ -61,6 +65,16 @@ const trpcClient = trpc.createClient({
             window.localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
           }
         }
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (response.ok && contentType.includes("application/json")) {
+        return response;
+      }
+      let text = await response.clone().text();
+      if (!text.trim() && response.status >= 500) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        response = await executeFetch();
+        text = await response.clone().text();
       }
       if (!text.trim()) {
         const fallbackPayload = [{

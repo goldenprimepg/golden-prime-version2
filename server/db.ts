@@ -62,7 +62,7 @@ const cachedPasswordHashes = new Map<string, string>();
 function hashSeedPassword(password: string) {
   const existing = cachedPasswordHashes.get(password);
   if (existing) return existing;
-  const salt = randomBytes(16).toString("hex");
+  const salt = "676f6c64656e7072696d657365656431";
   const derived = scryptSync(password, salt, 64).toString("hex");
   const hashed = `${salt}:${derived}`;
   cachedPasswordHashes.set(password, hashed);
@@ -146,21 +146,27 @@ async function ensureCoreSeedAccounts(db: DatabaseConnection) {
     },
   ];
 
-  const existingUsers = await db.select({ id: users.id, openId: users.openId, phone: users.phone }).from(users);
+  const existingUsers = await db.select({ id: users.id, openId: users.openId, phone: users.phone, name: users.name, role: users.role, passwordHash: users.passwordHash }).from(users);
+  const missingAccounts: Array<typeof users.$inferInsert> = [];
   for (const account of coreAccounts) {
     const match = existingUsers.find(u => u.openId === account.openId || (account.phone && u.phone === account.phone));
     if (match) {
-      await db.update(users).set({
-        name: account.name,
-        email: account.email,
-        phone: account.phone,
-        passwordHash: account.passwordHash,
-        loginMethod: "phone-password",
-        role: account.role,
-      }).where(eq(users.id, match.id));
+      if (!match.passwordHash || match.role !== account.role || match.phone !== account.phone || match.name !== account.name) {
+        await db.update(users).set({
+          name: account.name,
+          email: account.email,
+          phone: account.phone,
+          passwordHash: match.passwordHash || account.passwordHash,
+          loginMethod: "phone-password",
+          role: account.role,
+        }).where(eq(users.id, match.id));
+      }
     } else {
-      await db.insert(users).values(account).onConflictDoNothing();
+      missingAccounts.push(account);
     }
+  }
+  if (missingAccounts.length > 0) {
+    await db.insert(users).values(missingAccounts).onConflictDoNothing();
   }
 }
 
@@ -733,7 +739,7 @@ export async function getDb(): Promise<DatabaseConnection | null> {
         ?? process.env.POSTGRES_URL
         ?? process.env.POSTGRES_PRISMA_URL
         ?? process.env.POSTGRES_URL_NON_POOLING;
-      if (!connectionString || usingEmbeddedFallback) {
+      if (!connectionString || connectionString.includes("<") || connectionString.includes(">") || usingEmbeddedFallback) {
         usingEmbeddedFallback = true;
         return await initEmbeddedPglite();
       }
@@ -2000,25 +2006,54 @@ export async function markReminderComplete(reminderId: number, buildingId: numbe
   await db.update(reminders).set({ status: "complete" }).where(and(eq(reminders.id, reminderId), eq(reminders.buildingId, buildingId)));
 }
 
-export async function getBuildingSnapshot(buildingId: number) {
-  const db = await requireDb();
-  const [floorRows, roomRows, tenantRows, tenantServiceRows, allocationRows, rentRows, electricityRows, expenseRows, operatingCostRows, serviceChargeRows, reminderRows, notificationRows, tenantChargeRows, transferRows] = await Promise.all([
-    db.select().from(floors).where(eq(floors.buildingId, buildingId)),
-    db.select().from(rooms).where(eq(rooms.buildingId, buildingId)),
-    db.select().from(tenants).where(eq(tenants.buildingId, buildingId)),
-    db.select().from(tenantServices).where(eq(tenantServices.buildingId, buildingId)).orderBy(tenantServices.tenantId),
-    db.select().from(roomAllocations).where(eq(roomAllocations.buildingId, buildingId)),
-    db.select().from(rentPayments).where(eq(rentPayments.buildingId, buildingId)).orderBy(desc(rentPayments.dueDate)),
-    db.select().from(electricityBills).where(eq(electricityBills.buildingId, buildingId)).orderBy(desc(electricityBills.billingMonth)),
-    db.select().from(expenses).where(eq(expenses.buildingId, buildingId)).orderBy(desc(expenses.expenseDate)),
-    db.select().from(operatingCosts).where(eq(operatingCosts.buildingId, buildingId)).orderBy(desc(operatingCosts.costDate)),
-    db.select().from(serviceCharges).where(eq(serviceCharges.buildingId, buildingId)).orderBy(serviceCharges.name),
-    db.select().from(reminders).where(eq(reminders.buildingId, buildingId)).orderBy(reminders.dueDate),
-    db.select().from(managerNotifications).where(eq(managerNotifications.buildingId, buildingId)).orderBy(desc(managerNotifications.createdAt)).limit(40),
-    db.select().from(tenantCharges).where(eq(tenantCharges.buildingId, buildingId)).orderBy(desc(tenantCharges.createdAt)),
-    db.select().from(tenantTransfers).where(eq(tenantTransfers.buildingId, buildingId)).orderBy(desc(tenantTransfers.effectiveDate)),
-  ]);
-  return { floors: floorRows, rooms: roomRows, tenants: tenantRows, tenantServices: tenantServiceRows, allocations: allocationRows, rents: rentRows, electricity: electricityRows, expenses: expenseRows, operatingCosts: operatingCostRows, serviceCharges: serviceChargeRows, reminders: reminderRows, managerNotifications: notificationRows, tenantCharges: tenantChargeRows, tenantTransfers: transferRows };
+type BuildingSnapshotResult = {
+  floors: Array<typeof floors.$inferSelect>;
+  rooms: Array<typeof rooms.$inferSelect>;
+  tenants: Array<typeof tenants.$inferSelect>;
+  tenantServices: Array<typeof tenantServices.$inferSelect>;
+  allocations: Array<typeof roomAllocations.$inferSelect>;
+  rents: Array<typeof rentPayments.$inferSelect>;
+  electricity: Array<typeof electricityBills.$inferSelect>;
+  expenses: Array<typeof expenses.$inferSelect>;
+  operatingCosts: Array<typeof operatingCosts.$inferSelect>;
+  serviceCharges: Array<typeof serviceCharges.$inferSelect>;
+  reminders: Array<typeof reminders.$inferSelect>;
+  managerNotifications: Array<typeof managerNotifications.$inferSelect>;
+  tenantCharges: Array<typeof tenantCharges.$inferSelect>;
+  tenantTransfers: Array<typeof tenantTransfers.$inferSelect>;
+};
+
+const inFlightSnapshots = new Map<number, Promise<BuildingSnapshotResult>>();
+
+export async function getBuildingSnapshot(buildingId: number): Promise<BuildingSnapshotResult> {
+  const existing = inFlightSnapshots.get(buildingId);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    const db = await requireDb();
+    const [floorRows, roomRows, tenantRows, tenantServiceRows, allocationRows, rentRows, electricityRows, expenseRows, operatingCostRows, serviceChargeRows, reminderRows, notificationRows, tenantChargeRows, transferRows] = await Promise.all([
+      db.select().from(floors).where(eq(floors.buildingId, buildingId)),
+      db.select().from(rooms).where(eq(rooms.buildingId, buildingId)),
+      db.select().from(tenants).where(eq(tenants.buildingId, buildingId)),
+      db.select().from(tenantServices).where(eq(tenantServices.buildingId, buildingId)).orderBy(tenantServices.tenantId),
+      db.select().from(roomAllocations).where(eq(roomAllocations.buildingId, buildingId)),
+      db.select().from(rentPayments).where(eq(rentPayments.buildingId, buildingId)).orderBy(desc(rentPayments.dueDate)),
+      db.select().from(electricityBills).where(eq(electricityBills.buildingId, buildingId)).orderBy(desc(electricityBills.billingMonth)),
+      db.select().from(expenses).where(eq(expenses.buildingId, buildingId)).orderBy(desc(expenses.expenseDate)),
+      db.select().from(operatingCosts).where(eq(operatingCosts.buildingId, buildingId)).orderBy(desc(operatingCosts.costDate)),
+      db.select().from(serviceCharges).where(eq(serviceCharges.buildingId, buildingId)).orderBy(serviceCharges.name),
+      db.select().from(reminders).where(eq(reminders.buildingId, buildingId)).orderBy(reminders.dueDate),
+      db.select().from(managerNotifications).where(eq(managerNotifications.buildingId, buildingId)).orderBy(desc(managerNotifications.createdAt)).limit(40),
+      db.select().from(tenantCharges).where(eq(tenantCharges.buildingId, buildingId)).orderBy(desc(tenantCharges.createdAt)),
+      db.select().from(tenantTransfers).where(eq(tenantTransfers.buildingId, buildingId)).orderBy(desc(tenantTransfers.effectiveDate)),
+    ]);
+    return { floors: floorRows, rooms: roomRows, tenants: tenantRows, tenantServices: tenantServiceRows, allocations: allocationRows, rents: rentRows, electricity: electricityRows, expenses: expenseRows, operatingCosts: operatingCostRows, serviceCharges: serviceChargeRows, reminders: reminderRows, managerNotifications: notificationRows, tenantCharges: tenantChargeRows, tenantTransfers: transferRows };
+  })().finally(() => {
+    inFlightSnapshots.delete(buildingId);
+  });
+
+  inFlightSnapshots.set(buildingId, promise);
+  return promise;
 }
 
 export async function getReceiptReviewHistory(input: { buildingId: number; tenantId?: number; reviewerId?: number; reviewedFrom?: Date; reviewedTo?: Date; paymentMethod?: "cash" | "upi" | "bank_transfer"; amountMinPaise?: number; amountMaxPaise?: number }) {

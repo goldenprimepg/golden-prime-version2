@@ -33,7 +33,7 @@ export default function Dashboard() {
   const currentYear = new Date().getUTCFullYear();
   const reportingYears = Array.from({ length: 8 }, (_, index) => String(currentYear - index));
   const periodKey = periodMode === "monthly" ? selectedMonth : selectedYear;
-  const dashboard = trpc.pg.dashboard.get.useQuery({ buildingId: buildingId ?? 0, periodMode, periodKey }, { enabled: Boolean(buildingId), ...liveQueryOptions });
+  const dashboard = trpc.pg.dashboard.get.useQuery({ buildingId: buildingId ?? 0, periodMode, periodKey }, { enabled: Boolean(buildingId), placeholderData: prev => prev, ...liveQueryOptions });
 
   if (buildingsQuery.isLoading) return <LoadingState />;
   if (!building || !buildingId) return <><BuildingEmptyState onCreate={() => setShowOnboarding(true)} /><BuildingOnboardingModal open={showOnboarding} onOpenChange={setShowOnboarding} onComplete={setBuildingId} /></>;

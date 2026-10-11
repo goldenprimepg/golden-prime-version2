@@ -108,7 +108,7 @@ export default function Exports() {
   } | null>(null);
   const selectedLabels = useMemo(() => new Set(selected), [selected]);
   const previewInput = useMemo(() => ({ buildingId: buildingId ?? 0, mode: "selected" as const, datasets: selected, dateFrom: dateFrom || undefined, dateTo: dateTo || undefined, paymentStatus, outstandingOnly }), [buildingId, dateFrom, dateTo, outstandingOnly, paymentStatus, selected]);
-  const workbookPreview = trpc.pg.exports.previewWorkbook.useQuery(previewInput, { enabled: Boolean(buildingId) && mode === "selected" && selected.length > 0 });
+  const workbookPreview = trpc.pg.exports.previewWorkbook.useQuery(previewInput, { enabled: Boolean(buildingId) && mode === "selected" && selected.length > 0, placeholderData: prev => prev });
   const prepareWorkbook = trpc.pg.exports.prepareWorkbook.useMutation({
     onSuccess: (data, variables) => {
       createWorkbook(data.sheets, `${data.buildingName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}-${variables.mode}-export-${new Date().toISOString().slice(0, 10)}.xlsx`);
