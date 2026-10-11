@@ -20,6 +20,8 @@ type BuildingWorkspaceValue = {
   isOfflineSnapshot: boolean;
   snapshotQuery: WorkspaceSnapshotQuery;
   isRefreshing: boolean;
+  invalidateWorkspace: (targetId?: number) => Promise<void>;
+  lastSyncedAt: Date | null;
 };
 
 const STORAGE_KEY = "golden-prime-active-building";
@@ -29,6 +31,7 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   const { user } = useAuth();
   const { isReachable: isOnline } = useServerReachability();
   const utils = trpc.useUtils();
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(() => new Date());
   const liveBuildingsQuery = trpc.pg.buildings.list.useQuery(undefined, { ...liveQueryOptions, enabled: isOnline });
   const [buildingId, setBuildingIdState] = useState<number | null>(() => {
     const stored = Number(window.localStorage.getItem(STORAGE_KEY));
@@ -72,8 +75,49 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     isLoading: !snapshotData && ((isOnline && liveWorkspaceSnapshot.isLoading) || !offlineSnapshot?.data),
   }) as WorkspaceSnapshotQuery, [isOnline, liveWorkspaceSnapshot.isLoading, offlineSnapshot?.data, snapshotData]);
 
+  const invalidateWorkspace = async (targetId?: number) => {
+    const id = targetId ?? buildingId;
+    await Promise.all([
+      utils.pg.operations.snapshot.invalidate(id ? { buildingId: id } : undefined),
+      utils.pg.dashboard.get.invalidate(id ? { buildingId: id } : undefined),
+      utils.pg.profit.get.invalidate(id ? { buildingId: id } : undefined),
+      utils.pg.notifications.list.invalidate(id ? { buildingId: id } : undefined),
+      utils.pg.buildings.list.invalidate(),
+      utils.pg.receiptReviews.history.invalidate(),
+    ]);
+    setLastSyncedAt(new Date());
+    try {
+      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+        const channel = new BroadcastChannel("golden_prime_sync");
+        channel.postMessage({ type: "workspace_updated", buildingId: id });
+        channel.close();
+      }
+    } catch {
+      // BroadcastChannel optional
+    }
+  };
+
   useEffect(() => {
-    if (!buildingId || !isOnline || user?.role !== "manager") return;
+    if (typeof window === "undefined" || !("BroadcastChannel" in window)) return;
+    const channel = new BroadcastChannel("golden_prime_sync");
+    channel.onmessage = (event) => {
+      if (event.data?.type === "workspace_updated") {
+        void Promise.all([
+          utils.pg.operations.snapshot.invalidate(),
+          utils.pg.dashboard.get.invalidate(),
+          utils.pg.profit.get.invalidate(),
+          utils.pg.notifications.list.invalidate(),
+          utils.pg.buildings.list.invalidate(),
+          utils.pg.receiptReviews.history.invalidate(),
+        ]);
+        setLastSyncedAt(new Date());
+      }
+    };
+    return () => channel.close();
+  }, [utils]);
+
+  useEffect(() => {
+    if (!buildingId || !isOnline || (user?.role !== "manager" && user?.role !== "admin")) return;
     const currentMonth = new Date().toISOString().slice(0, 7);
     void utils.pg.dashboard.get.prefetch({ buildingId, periodMode: "monthly", periodKey: currentMonth });
     void utils.pg.profit.get.prefetch({ buildingId, periodKey: currentMonth });
@@ -85,7 +129,7 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     saveOfflineWorkspaceSnapshot({ userId: user.id, buildingId, building, data: liveWorkspaceSnapshot.data as Record<string, unknown> });
   }, [building, buildingId, liveWorkspaceSnapshot.data, user]);
 
-  return <BuildingWorkspaceContext.Provider value={{ buildingsQuery, buildingId, building, setBuildingId, isOfflineSnapshot: Boolean(!isOnline && offlineSnapshot), snapshotQuery, isRefreshing }}>{children}</BuildingWorkspaceContext.Provider>;
+  return <BuildingWorkspaceContext.Provider value={{ buildingsQuery, buildingId, building, setBuildingId, isOfflineSnapshot: Boolean(!isOnline && offlineSnapshot), snapshotQuery, isRefreshing, invalidateWorkspace, lastSyncedAt }}>{children}</BuildingWorkspaceContext.Provider>;
 }
 
 export function useBuildingWorkspace() {

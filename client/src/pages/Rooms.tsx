@@ -24,7 +24,7 @@ function fileToDataUrl(file: File) {
 }
 
 export default function Rooms() {
-  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const { requestDelete } = useDeletionSafety();
   const [showFloor, setShowFloor] = useState(false);
@@ -35,14 +35,14 @@ export default function Rooms() {
   const [creatingTenantInRoomId, setCreatingTenantInRoomId] = useState<number | null>(null);
   const [vacantOnly, setVacantOnly] = useState(false);
   const uploadFeedback = useUploadFeedback();
-  const generateFloors = trpc.pg.operations.addGeneratedFloors.useMutation({ onSuccess: async result => { await utils.pg.operations.snapshot.invalidate(); setShowFloor(false); toast.success(result.createdCount > 0 ? `${result.createdCount} floor${result.createdCount === 1 ? "" : "s"} created` : "These standard floors already exist"); }, onError: error => toast.error(error.message) });
-  const deleteFloor = trpc.pg.operations.deleteFloor.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); toast.success("Floor deleted"); }, onError: error => toast.error(error.message) });
-  const addRoom = trpc.pg.operations.addRoom.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); setShowRoom(false); uploadFeedback.clear(); toast.success("Room added"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
-  const setupRoomWithTenant = trpc.pg.operations.setupRoomWithTenant.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); setShowRoomSetup(false); uploadFeedback.clear(); toast.success("Room, tenant, rent, and services saved"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
-  const updateRoom = trpc.pg.operations.updateRoom.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); setEditingRoomId(null); uploadFeedback.clear(); toast.success("Room details updated"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
-  const allocateTenantWithServices = trpc.pg.operations.allocateTenantWithServices.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); setAllocatingRoomId(null); toast.success("Tenant, rent, and services saved for this room"); }, onError: error => toast.error(error.message) });
-  const createTenantForRoom = trpc.pg.operations.createTenantForRoom.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); setCreatingTenantInRoomId(null); toast.success("New tenant, rent, allocation, and services saved for this room"); }, onError: error => toast.error(error.message) });
-  const deleteRoom = trpc.pg.operations.deleteRoom.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); toast.success("Room deleted"); }, onError: error => toast.error(error.message) });
+  const generateFloors = trpc.pg.operations.addGeneratedFloors.useMutation({ onSuccess: async result => { await invalidateWorkspace(); setShowFloor(false); toast.success(result.createdCount > 0 ? `${result.createdCount} floor${result.createdCount === 1 ? "" : "s"} created` : "These standard floors already exist"); }, onError: error => toast.error(error.message) });
+  const deleteFloor = trpc.pg.operations.deleteFloor.useMutation({ onSuccess: async () => { await invalidateWorkspace(); toast.success("Floor deleted"); }, onError: error => toast.error(error.message) });
+  const addRoom = trpc.pg.operations.addRoom.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setShowRoom(false); uploadFeedback.clear(); toast.success("Room added"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
+  const setupRoomWithTenant = trpc.pg.operations.setupRoomWithTenant.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setShowRoomSetup(false); uploadFeedback.clear(); toast.success("Room, tenant, rent, and services saved"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
+  const updateRoom = trpc.pg.operations.updateRoom.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setEditingRoomId(null); uploadFeedback.clear(); toast.success("Room details updated"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
+  const allocateTenantWithServices = trpc.pg.operations.allocateTenantWithServices.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setAllocatingRoomId(null); toast.success("Tenant, rent, and services saved for this room"); }, onError: error => toast.error(error.message) });
+  const createTenantForRoom = trpc.pg.operations.createTenantForRoom.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setCreatingTenantInRoomId(null); toast.success("New tenant, rent, allocation, and services saved for this room"); }, onError: error => toast.error(error.message) });
+  const deleteRoom = trpc.pg.operations.deleteRoom.useMutation({ onSuccess: async () => { await invalidateWorkspace(); toast.success("Room deleted"); }, onError: error => toast.error(error.message) });
   const uploadImage = trpc.pg.uploads.image.useMutation({ onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
   const roomOccupancy = useMemo(() => { const counts = new Map<number, number>(); snapshot.data?.allocations.filter(item => item.status === "active").forEach(item => counts.set(item.roomId, (counts.get(item.roomId) ?? 0) + 1)); return counts; }, [snapshot.data]);
   const requestedAllocationRoomId = Number(new URLSearchParams(window.location.search).get("allocate"));

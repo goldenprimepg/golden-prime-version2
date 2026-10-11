@@ -22,9 +22,36 @@ export default function TenantPortal() {
   const [submittingReceipt, setSubmittingReceipt] = useState<string | null>(null);
   const [tenantPaymentMethod, setTenantPaymentMethod] = useState<"cash" | "upi" | "bank_transfer">("upi");
   const [showMotionPreferences, setShowMotionPreferences] = useState(false);
-  const requestSupport = trpc.tenant.requests.create.useMutation({ onSuccess: async () => { await utils.tenant.me.invalidate(); setShowRequest(false); toast.success("Your request has been sent to the Building Manager"); }, onError: error => toast.error(error.message) });
+  const requestSupport = trpc.tenant.requests.create.useMutation({
+    onSuccess: async () => {
+      await utils.tenant.me.invalidate();
+      setShowRequest(false);
+      try {
+        if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+          const channel = new BroadcastChannel("golden_prime_sync");
+          channel.postMessage({ type: "workspace_updated" });
+          channel.close();
+        }
+      } catch {}
+      toast.success("Your request has been sent to the Building Manager");
+    },
+    onError: error => toast.error(error.message)
+  });
   const uploadImage = trpc.pg.uploads.image.useMutation({ onError: error => toast.error(error.message) });
-  const submitPaymentReceipt = trpc.tenant.payments.submitReceipt.useMutation({ onSuccess: async data => { await utils.tenant.me.invalidate(); toast.success(`${data.label} receipt shared with the Building Manager`); }, onError: error => toast.error(error.message) });
+  const submitPaymentReceipt = trpc.tenant.payments.submitReceipt.useMutation({
+    onSuccess: async data => {
+      await utils.tenant.me.invalidate();
+      try {
+        if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+          const channel = new BroadcastChannel("golden_prime_sync");
+          channel.postMessage({ type: "workspace_updated" });
+          channel.close();
+        }
+      } catch {}
+      toast.success(`${data.label} receipt shared with the Building Manager`);
+    },
+    onError: error => toast.error(error.message)
+  });
   useEffect(() => {
     const building = portal.data?.building;
     if (!user || !building) return;

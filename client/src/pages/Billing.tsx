@@ -121,7 +121,7 @@ function BuildingElectricityBillCard({ buildingId, billingMonth }: { buildingId:
 
 export default function Billing() {
   const [location, setLocation] = useLocation();
-  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot, invalidateWorkspace } = useActiveBuilding();
   const { displayDensity } = useMotionPreferences();
   const utils = trpc.useUtils();
   const deletionSafety = useDeletionSafety();
@@ -163,7 +163,7 @@ export default function Billing() {
     const frame = window.requestAnimationFrame(() => recordEditorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     return () => window.cancelAnimationFrame(frame);
   }, [editingBillId, editingRentId, editingTenantChargeId]);
-  const refresh = async () => { await utils.pg.operations.snapshot.invalidate(); await utils.pg.receiptReviews.history.invalidate(); await utils.pg.dashboard.get.invalidate(); };
+  const refresh = async () => { await invalidateWorkspace(); await utils.pg.receiptReviews.history.invalidate(); };
   const rentMutation = trpc.pg.rent.upsert.useMutation({ onSuccess: async data => { await refresh(); setShowForm(false); uploadFeedback.clear(); setConflictMessage(null); toast.success(data.ownerAlertSent ? "Rent saved and owner alerted" : "Rent payment saved"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
   const electricityMutation = trpc.pg.electricity.upsert.useMutation({ onSuccess: async data => { await refresh(); setShowForm(false); uploadFeedback.clear(); toast.success(`Electricity bill calculated: ${formatCurrency(data.billAmountPaise)}`); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
   const updateRent = trpc.pg.rent.update.useMutation({ onSuccess: async data => { await refresh(); setEditingRentId(null); uploadFeedback.clear(); setConflictMessage(null); toast.success(`Rent updated as ${data.status}`); }, onError: async error => { await refresh(); uploadFeedback.clear(); if (error.message.includes("changed on another device")) setConflictMessage("The latest record was loaded from another device. Review the refreshed form and save again."); else toast.error(error.message); } });

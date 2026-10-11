@@ -22,10 +22,10 @@ const roles = [
 
 export default function Settings() {
   const { user } = useAuth();
-  const { buildingsQuery, building, buildingId, setBuildingId } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const { displayDensity, setDisplayDensity } = useMotionPreferences();
-  const update = trpc.pg.buildings.update.useMutation({ onSuccess: async () => { await utils.pg.buildings.list.invalidate(); toast.success("Building settings saved"); }, onError: error => toast.error(error.message) });
+  const update = trpc.pg.buildings.update.useMutation({ onSuccess: async () => { await invalidateWorkspace(); toast.success("Building settings saved"); }, onError: error => toast.error(error.message) });
   if (user?.role !== "admin" && user?.role !== "manager") return <div className="mx-auto max-w-xl rounded-3xl border border-border/70 bg-card p-8 text-center shadow-[0_10px_28px_rgba(23,43,77,0.05)]"><ShieldCheck className="mx-auto h-6 w-6 text-primary" /><h1 className="mt-4 text-lg font-semibold">Manager or Owner access required</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">Building configuration is available to the Owner and delegated Manager. Team membership and role administration remain Owner-only.</p></div>;
   if (buildingsQuery.isLoading) return <LoadingState />;
   if (!building || !buildingId) return <BuildingEmptyState />;

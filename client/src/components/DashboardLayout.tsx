@@ -22,7 +22,7 @@ import {
 import { useIsMobile } from "@/hooks/useMobile";
 import { useBuildingWorkspace } from "@/contexts/BuildingWorkspaceContext";
 import { useMotionPreferences } from "@/contexts/MotionContext";
-import { BellRing, Building2, CircleDollarSign, Download, DoorOpen, KeyRound, Landmark, LayoutDashboard, LoaderCircle, LogOut, PanelLeft, ReceiptIndianRupee, Settings2, UsersRound, WalletCards } from "lucide-react";
+import { BellRing, Building2, CircleDollarSign, Download, DoorOpen, KeyRound, Landmark, LayoutDashboard, LoaderCircle, LogOut, PanelLeft, ReceiptIndianRupee, RefreshCw, Settings2, UsersRound, WalletCards } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -104,7 +104,7 @@ function DashboardLayoutContent({
   const sidebarRef = useRef<HTMLDivElement>(null);
   const visibleMenuItems = menuItems;
   const isMobile = useIsMobile();
-  const { buildingsQuery, building, buildingId, setBuildingId, isRefreshing } = useBuildingWorkspace();
+  const { buildingsQuery, building, buildingId, setBuildingId, isRefreshing, invalidateWorkspace } = useBuildingWorkspace();
   const { displayDensity } = useMotionPreferences();
 
   useEffect(() => {
@@ -237,9 +237,73 @@ function DashboardLayoutContent({
       <SidebarInset>
         <div className="sticky top-0 z-30 flex min-h-14 flex-wrap items-center justify-between gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur sm:px-6">
           <div className="flex min-w-0 items-center gap-2"><SidebarTrigger className={`h-9 w-9 rounded-lg bg-background ${isMobile ? "inline-flex" : "hidden"}`} /><div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Active workspace</p><p className="truncate text-sm font-semibold text-foreground">{building?.name ?? "Choose a building"}</p></div></div>
-          <div className="flex items-center gap-2">{isRefreshing ? <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground" role="status" aria-live="polite" aria-label="Refreshing workspace"><LoaderCircle className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" /><span className="hidden sm:inline">Refreshing workspace…</span></span> : null}<select value={buildingId ?? ""} onChange={event => setBuildingId(Number(event.target.value))} disabled={buildingsQuery.isLoading || !buildingsQuery.data?.length} className="h-10 max-w-[12rem] rounded-xl border border-border bg-card px-3 text-sm font-medium outline-none focus:border-primary focus:ring-4 focus:ring-primary/10" aria-label="Active building workspace">{buildingsQuery.data?.length ? buildingsQuery.data.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option value="">No buildings</option>}</select><Button variant="outline" className="h-10 rounded-xl" onClick={() => setLocation("/buildings")}>Manage</Button></div>
+          <div className="flex items-center gap-2">
+            <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-800 text-[11px] font-medium" title="Real-time live synchronization active">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span>Live Sync</span>
+            </span>
+            {isRefreshing ? <span className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground" role="status" aria-live="polite" aria-label="Refreshing workspace"><LoaderCircle className="h-3.5 w-3.5 motion-safe:animate-spin" aria-hidden="true" /><span className="hidden sm:inline">Refreshing workspace…</span></span> : null}
+            <button type="button" onClick={() => void invalidateWorkspace()} title="Instant workspace synchronization" className="h-10 w-10 flex items-center justify-center rounded-xl border border-border bg-card text-muted-foreground hover:text-foreground hover:bg-accent transition" aria-label="Sync workspace"><RefreshCw className="h-3.5 w-3.5" /></button>
+            <select value={buildingId ?? ""} onChange={event => setBuildingId(Number(event.target.value))} disabled={buildingsQuery.isLoading || !buildingsQuery.data?.length} className="h-10 max-w-[12rem] rounded-xl border border-border bg-card px-3 text-sm font-medium outline-none focus:border-primary focus:ring-4 focus:ring-primary/10" aria-label="Active building workspace">{buildingsQuery.data?.length ? buildingsQuery.data.map(item => <option key={item.id} value={item.id}>{item.name}</option>) : <option value="">No buildings</option>}</select>
+            <Button variant="outline" className="h-10 rounded-xl" onClick={() => setLocation("/buildings")}>Manage</Button>
+          </div>
         </div>
-        <main className={`manager-density-${displayDensity} flex-1 p-4 sm:p-6 lg:p-8`} data-display-density={displayDensity}>{children}</main>
+        <main className={`manager-density-${displayDensity} flex-1 p-4 pb-20 sm:pb-6 sm:p-6 lg:p-8`} data-display-density={displayDensity}>{children}</main>
+        {isMobile ? (
+          <nav aria-label="Mobile Navigation" className="fixed bottom-0 left-0 right-0 z-40 flex items-center justify-around border-t border-border bg-background/95 px-2 py-1.5 backdrop-blur supports-[backdrop-filter]:backdrop-blur sm:hidden">
+            <button
+              type="button"
+              onClick={() => setLocation("/overview")}
+              className={`flex min-h-[44px] flex-1 flex-col items-center justify-center rounded-xl py-1 text-[11px] font-medium transition-colors ${
+                location === "/overview" || location === "/" ? "text-primary font-bold" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <LayoutDashboard className="h-4 w-4 mb-0.5" />
+              <span>Overview</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocation("/rooms")}
+              className={`flex min-h-[44px] flex-1 flex-col items-center justify-center rounded-xl py-1 text-[11px] font-medium transition-colors ${
+                location === "/rooms" ? "text-primary font-bold" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <DoorOpen className="h-4 w-4 mb-0.5" />
+              <span>Rooms</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocation("/tenants")}
+              className={`flex min-h-[44px] flex-1 flex-col items-center justify-center rounded-xl py-1 text-[11px] font-medium transition-colors ${
+                location === "/tenants" ? "text-primary font-bold" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <UsersRound className="h-4 w-4 mb-0.5" />
+              <span>Tenants</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocation("/collections")}
+              className={`flex min-h-[44px] flex-1 flex-col items-center justify-center rounded-xl py-1 text-[11px] font-medium transition-colors ${
+                location === "/collections" ? "text-primary font-bold" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <WalletCards className="h-4 w-4 mb-0.5" />
+              <span>Collections</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              className="flex min-h-[44px] flex-1 flex-col items-center justify-center rounded-xl py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <PanelLeft className="h-4 w-4 mb-0.5" />
+              <span>Menu</span>
+            </button>
+          </nav>
+        ) : null}
       </SidebarInset>
     </>
   );

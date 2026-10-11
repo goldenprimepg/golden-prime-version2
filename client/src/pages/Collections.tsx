@@ -4,6 +4,8 @@ import {
   ChevronDown,
   ChevronUp,
   CircleDollarSign,
+  Copy,
+  FileText,
   MessageCircle,
   Plus,
   ReceiptIndianRupee,
@@ -83,7 +85,7 @@ type CardDraft = {
 
 export default function Collections() {
   const [location] = useLocation();
-  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const deletionSafety = useDeletionSafety();
   const requestedMonth = new URLSearchParams(location.split("?")[1] ?? "").get("month");
@@ -131,9 +133,7 @@ export default function Collections() {
   const [savingAllocationId, setSavingAllocationId] = useState<number | null>(null);
 
   const refresh = async () => {
-    await utils.pg.operations.snapshot.invalidate();
-    await utils.pg.dashboard.get.invalidate();
-    await utils.pg.profit.get.invalidate();
+    await invalidateWorkspace();
   };
 
   const generateCycle = trpc.pg.rent.generateCycle.useMutation({
@@ -307,7 +307,7 @@ export default function Collections() {
   }, [month, snapshot.data, statusFilter]);
 
   // Unified Tenant + Room Monthly Cards for single-tab operations
-  const unifiedCards = useMemo(() => {
+  const allUnifiedCards = useMemo(() => {
     if (!snapshot.data || !building) return [];
     const tenantById = new Map(snapshot.data.tenants.map(t => [t.id, t]));
     const roomById = new Map(snapshot.data.rooms.map(r => [r.id, r]));
@@ -318,7 +318,7 @@ export default function Collections() {
         const tenant = tenantById.get(allocation.tenantId);
         const room = roomById.get(allocation.roomId);
         if (!tenant || !room) return null;
-        const floor = floorById.get(room.floorId);
+        const floor = room.floorId != null ? floorById.get(room.floorId) : undefined;
 
         const rentRecord =
           snapshot.data.rents.find(
@@ -420,7 +420,23 @@ export default function Collections() {
           overallStatus,
         };
       })
-      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  }, [activeAllocations, building, month, snapshot.data]);
+
+  const statusCounts = useMemo(() => {
+    let pending = 0;
+    let partial = 0;
+    let paid = 0;
+    for (const item of allUnifiedCards) {
+      if (item.overallStatus === "paid") paid++;
+      else if (item.overallStatus === "partial") partial++;
+      else pending++;
+    }
+    return { all: allUnifiedCards.length, pending, partial, paid };
+  }, [allUnifiedCards]);
+
+  const unifiedCards = useMemo(() => {
+    return allUnifiedCards
       .filter(item => {
         if (statusFilter !== "all" && item.overallStatus !== statusFilter) return false;
         const q = searchQuery.trim().toLowerCase();
@@ -432,7 +448,7 @@ export default function Collections() {
         );
       })
       .sort((a, b) => a.room.number.localeCompare(b.room.number, undefined, { numeric: true }));
-  }, [activeAllocations, building, month, searchQuery, snapshot.data, statusFilter]);
+  }, [allUnifiedCards, searchQuery, statusFilter]);
 
   // Accurate month summary totals across Rent + Electricity + Services
   const monthSummary = useMemo(() => {
@@ -702,6 +718,113 @@ export default function Collections() {
       // Mutation onError handles toast
     } finally {
       setSavingAllocationId(null);
+    }
+  };
+
+  const handleQuickCollectAll = async (card: (typeof unifiedCards)[number]) => {
+    const draft = getDraftForCard(card);
+    const expectedRentPaise = Math.max(0, Math.round(Number(draft.expectedRentRupees || 0) * 100));
+    setSavingAllocationId(card.allocation.id);
+    try {
+      if (card.rentRecord) {
+        await updateRent.mutateAsync({
+          id: card.rentRecord.id,
+          buildingId,
+          expectedUpdatedAt: card.rentRecord.updatedAt,
+          dueDate: draft.dueDate,
+          expectedAmountPaise: expectedRentPaise,
+          paidAmountPaise: expectedRentPaise,
+          paidOn: todayIso(),
+          paymentMethod: draft.paymentMethod || "upi",
+          notes: draft.notes || "Collected in full",
+        });
+      } else {
+        await upsertRent.mutateAsync({
+          buildingId,
+          allocationId: card.allocation.id,
+          tenantId: card.tenant.id,
+          rentMonth: month,
+          dueDate: draft.dueDate,
+          expectedAmountPaise: expectedRentPaise,
+          paidAmountPaise: expectedRentPaise,
+          paidOn: todayIso(),
+          paymentMethod: draft.paymentMethod || "upi",
+          notes: draft.notes || "Collected in full",
+        });
+      }
+
+      const hasCurrReading = draft.currReading.trim() !== "";
+      if (hasCurrReading) {
+        const prevReading = Math.max(0, Math.round(Number(draft.prevReading || 0)));
+        const currReading = Math.max(0, Math.round(Number(draft.currReading || 0)));
+        const units = Math.max(0, currReading - prevReading);
+        const billAmountPaise = units * building.electricityRatePaise;
+        if (card.roomElectricityBill) {
+          await updateElectricity.mutateAsync({
+            id: card.roomElectricityBill.id,
+            buildingId,
+            expectedUpdatedAt: card.roomElectricityBill.updatedAt,
+            previousReading: prevReading,
+            currentReading: currReading,
+            paidAmountPaise: billAmountPaise,
+            paidOn: todayIso(),
+            paymentMethod: draft.paymentMethod || "upi",
+            dueDate: draft.dueDate,
+          });
+        } else {
+          await upsertElectricity.mutateAsync({
+            buildingId,
+            roomId: card.room.id,
+            billingMonth: month,
+            previousReading: prevReading,
+            currentReading: currReading,
+            paidAmountPaise: billAmountPaise,
+            paidOn: todayIso(),
+            paymentMethod: draft.paymentMethod || "upi",
+            dueDate: draft.dueDate,
+          });
+        }
+      } else if (card.roomElectricityBill && card.roomElectricityBill.status !== "paid") {
+        await updateElectricity.mutateAsync({
+          id: card.roomElectricityBill.id,
+          buildingId,
+          expectedUpdatedAt: card.roomElectricityBill.updatedAt,
+          previousReading: card.roomElectricityBill.previousReading,
+          currentReading: card.roomElectricityBill.currentReading,
+          paidAmountPaise: card.roomElectricityBill.billAmountPaise,
+          paidOn: todayIso(),
+          paymentMethod: draft.paymentMethod || "upi",
+          dueDate: card.roomElectricityBill.dueDate ?? undefined,
+        });
+      }
+
+      await refresh();
+      setCardDrafts(prev => {
+        const copy = { ...prev };
+        delete copy[card.allocation.id];
+        return copy;
+      });
+      toast.success(`Marked all collections paid for ${card.tenant.fullName} (${month})`);
+    } catch {
+      // toast handled in mutation
+    } finally {
+      setSavingAllocationId(null);
+    }
+  };
+
+  const handleCopyReminder = async (card: (typeof unifiedCards)[number]) => {
+    const draft = getDraftForCard(card);
+    const text = buildReminderShareMessage(
+      building,
+      `Rent & utility balance (${formatCurrency(card.totalPendingPaise)}) · ${month}`,
+      draft.dueDate,
+      card.tenant.fullName,
+    );
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Payment reminder copied to clipboard!");
+    } catch {
+      toast.error("Failed to copy reminder.");
     }
   };
 
@@ -1347,10 +1470,10 @@ export default function Collections() {
             onChange={event => setStatusFilter(event.target.value as typeof statusFilter)}
             className={fieldClass}
           >
-            <option value="all">All statuses ({activeAllocations.length})</option>
-            <option value="pending">Unpaid / Pending</option>
-            <option value="partial">Partial Paid</option>
-            <option value="paid">Fully Paid</option>
+            <option value="all">All statuses ({statusCounts.all})</option>
+            <option value="pending">Unpaid / Pending ({statusCounts.pending})</option>
+            <option value="partial">Partial Paid ({statusCounts.partial})</option>
+            <option value="paid">Fully Paid ({statusCounts.paid})</option>
           </select>
         </label>
         <div className="flex items-end">
@@ -1361,6 +1484,85 @@ export default function Collections() {
           >
             <ReceiptIndianRupee className="h-4 w-4 text-primary" />
             {showLegacyLedger ? "Hide Itemized Ledger Rows" : `Show Itemized Ledger (${rows.length})`}
+          </button>
+        </div>
+
+        {/* 1-Tap Quick Status Buttons for Instant Touch Switching */}
+        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3 sm:col-span-2 lg:col-span-4">
+          <span className="mr-1 text-xs font-semibold text-muted-foreground">Quick View:</span>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+              statusFilter === "all"
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "border border-border bg-card text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            All Tenants
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                statusFilter === "all"
+                  ? "bg-primary-foreground/20 text-primary-foreground"
+                  : "bg-muted text-muted-foreground"
+              }`}
+            >
+              {statusCounts.all}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("pending")}
+            className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+              statusFilter === "pending"
+                ? "bg-rose-600 text-white shadow-sm"
+                : "border border-border bg-card text-rose-700 hover:bg-rose-50"
+            }`}
+          >
+            Unpaid / Due
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                statusFilter === "pending" ? "bg-white/25 text-white" : "bg-rose-100 text-rose-800"
+              }`}
+            >
+              {statusCounts.pending}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("partial")}
+            className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+              statusFilter === "partial"
+                ? "bg-amber-600 text-white shadow-sm"
+                : "border border-border bg-card text-amber-700 hover:bg-amber-50"
+            }`}
+          >
+            Partial Paid
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                statusFilter === "partial" ? "bg-white/25 text-white" : "bg-amber-100 text-amber-800"
+              }`}
+            >
+              {statusCounts.partial}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("paid")}
+            className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+              statusFilter === "paid"
+                ? "bg-emerald-600 text-white shadow-sm"
+                : "border border-border bg-card text-emerald-700 hover:bg-emerald-50"
+            }`}
+          >
+            Fully Paid
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] ${
+                statusFilter === "paid" ? "bg-white/25 text-white" : "bg-emerald-100 text-emerald-800"
+              }`}
+            >
+              {statusCounts.paid}
+            </span>
           </button>
         </div>
       </section>
@@ -1453,16 +1655,64 @@ export default function Collections() {
                         </span>
                       </p>
                     </div>
+                    {card.rentRecord?.receiptUrl ? (
+                      <a
+                        href={card.rentRecord.receiptUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-primary/30 bg-primary/10 px-3 text-xs font-semibold text-primary hover:bg-primary/20"
+                        title="View tenant rent receipt"
+                      >
+                        <FileText className="h-3.5 w-3.5" />
+                        Rent Receipt
+                      </a>
+                    ) : null}
+                    {card.roomElectricityBill?.receiptUrl ? (
+                      <a
+                        href={card.roomElectricityBill.receiptUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-primary/30 bg-primary/10 px-3 text-xs font-semibold text-primary hover:bg-primary/20"
+                        title="View electricity meter receipt"
+                      >
+                        <FileText className="h-3.5 w-3.5" />
+                        Meter Receipt
+                      </a>
+                    ) : null}
+                    {card.totalPendingPaise > 0 ? (
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => void handleQuickCollectAll(card)}
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
+                        title="1-tap collect entire pending rent & electricity balance"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        {isSaving ? "Saving…" : "Quick Collect Full"}
+                      </button>
+                    ) : null}
                     {whatsappUrl && card.totalPendingPaise > 0 ? (
                       <a
                         href={whatsappUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800"
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-800 hover:bg-emerald-100"
+                        title="Send WhatsApp payment reminder"
                       >
                         <MessageCircle className="h-3.5 w-3.5" />
                         WhatsApp
                       </a>
+                    ) : null}
+                    {card.totalPendingPaise > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyReminder(card)}
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-border bg-background px-3 text-xs font-semibold text-muted-foreground hover:text-foreground"
+                        title="Copy payment balance reminder text to clipboard"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy
+                      </button>
                     ) : null}
                     <button
                       type="button"
@@ -1775,7 +2025,22 @@ export default function Collections() {
                         />
                       </label>
                       <label className="grid gap-1 text-xs font-semibold">
-                        <span>Current Reading</span>
+                        <div className="flex items-center justify-between">
+                          <span>Current Reading</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              updateCardDraft(card, {
+                                currReading: draft.prevReading,
+                                ...(draft.elecStatus === "paid" ? { elecPaidRupees: "0" } : {}),
+                              });
+                            }}
+                            className="text-[10px] text-primary hover:underline font-bold"
+                            title="Copy previous meter reading to current"
+                          >
+                            Copy prev
+                          </button>
+                        </div>
                         <input
                           type="number"
                           min="0"

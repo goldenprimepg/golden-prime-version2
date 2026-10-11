@@ -21,16 +21,16 @@ function fileToDataUrl(file: File) { return new Promise<string>((resolve, reject
 export default function Buildings() {
   const { user } = useAuth();
   const canManageBuildings = user?.role === "admin" || user?.role === "manager";
-  const { buildingsQuery:buildings } = useActiveBuilding();
+  const { buildingsQuery:buildings, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const { requestDelete } = useDeletionSafety();
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [qrBuildingId, setQrBuildingId] = useState<number | null>(null);
   const uploadFeedback = useUploadFeedback();
-  const create = trpc.pg.buildings.create.useMutation({ onSuccess: async () => { await utils.pg.buildings.list.invalidate(); setShowCreate(false); uploadFeedback.clear(); toast.success("Building created"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
-  const update = trpc.pg.buildings.update.useMutation({ onSuccess: async () => { await utils.pg.buildings.list.invalidate(); setEditingId(null); uploadFeedback.clear(); toast.success("Building settings saved"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
-  const remove = trpc.pg.buildings.delete.useMutation({ onSuccess: async () => { await utils.pg.buildings.list.invalidate(); toast.success("Building deleted"); }, onError: error => toast.error(error.message) });
+  const create = trpc.pg.buildings.create.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setShowCreate(false); uploadFeedback.clear(); toast.success("Building created"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
+  const update = trpc.pg.buildings.update.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setEditingId(null); uploadFeedback.clear(); toast.success("Building settings saved"); }, onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
+  const remove = trpc.pg.buildings.delete.useMutation({ onSuccess: async () => { await invalidateWorkspace(); toast.success("Building deleted"); }, onError: error => toast.error(error.message) });
   const uploadImage = trpc.pg.uploads.image.useMutation({ onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
   const shareBuilding = async (building: NonNullable<typeof buildings.data>[number]) => {
     const details = [building.name, `${building.address}${building.city ? `, ${building.city}` : ""}`, building.landmark ? `Landmark: ${building.landmark}` : null, building.contactPhone ? `Manager contact: ${building.contactPhone}` : null, building.mapUrl ? `Map: ${building.mapUrl}` : null].filter(Boolean).join("\n");

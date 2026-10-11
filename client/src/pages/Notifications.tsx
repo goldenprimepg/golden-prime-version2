@@ -12,7 +12,7 @@ const iconForKind = (kind: string) => kind.startsWith("electricity") ? Zap : kin
 const toneForKind = (kind: string) => kind.includes("overdue") ? "bg-rose-50 text-rose-700 ring-rose-100" : kind === "rent_cycle" ? "bg-sky-50 text-sky-700 ring-sky-100" : "bg-amber-50 text-amber-700 ring-amber-100";
 
 export default function Notifications() {
-  const { buildingsQuery, building, buildingId, setBuildingId } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, invalidateWorkspace } = useActiveBuilding();
   const [, setLocation] = useLocation();
   const utils = trpc.useUtils();
   const notifications = trpc.pg.notifications.list.useQuery({ buildingId: buildingId ?? 0 }, { enabled: Boolean(buildingId), ...liveQueryOptions });
@@ -25,7 +25,7 @@ export default function Notifications() {
     try {
       const cycles = await generateCycle.mutateAsync({ buildingId });
       const refreshed = await refreshAlerts.mutateAsync({ buildingId });
-      await Promise.all([utils.pg.notifications.list.invalidate({ buildingId }), utils.pg.operations.snapshot.invalidate({ buildingId }), utils.pg.dashboard.get.invalidate({ buildingId })]);
+      await invalidateWorkspace(buildingId);
       toast.success(cycles.created > 0 ? `${cycles.created} monthly rent ${cycles.created === 1 ? "cycle was" : "cycles were"} created; ${refreshed.refreshed} alerts refreshed.` : `${refreshed.refreshed} collection alerts refreshed.`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Collection alerts could not be refreshed.");
@@ -36,7 +36,7 @@ export default function Notifications() {
     if (!buildingId) return;
     try {
       await markRead.mutateAsync({ buildingId });
-      await Promise.all([utils.pg.notifications.list.invalidate({ buildingId }), utils.pg.operations.snapshot.invalidate({ buildingId }), utils.pg.dashboard.get.invalidate({ buildingId })]);
+      await invalidateWorkspace(buildingId);
       toast.success("All collection notifications marked as read.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Notifications could not be updated.");
@@ -45,7 +45,7 @@ export default function Notifications() {
 
   const openBilling = async (id: number, unread: boolean) => {
     if (buildingId && unread) {
-      try { await markRead.mutateAsync({ buildingId, notificationIds: [id] }); await Promise.all([utils.pg.notifications.list.invalidate({ buildingId }), utils.pg.operations.snapshot.invalidate({ buildingId })]); } catch { /* Navigation remains available if read-state synchronization fails. */ }
+      try { await markRead.mutateAsync({ buildingId, notificationIds: [id] }); await invalidateWorkspace(buildingId); } catch { /* Navigation remains available if read-state synchronization fails. */ }
     }
     setLocation("/billing");
   };

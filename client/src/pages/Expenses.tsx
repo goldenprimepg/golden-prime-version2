@@ -27,7 +27,7 @@ export default function Expenses() {
   const [location] = useLocation();
   const requestedMonth = new URLSearchParams(location.split("?")[1] ?? "").get("month");
   const defaultExpenseDate = requestedMonth && /^\d{4}-\d{2}$/.test(requestedMonth) ? `${requestedMonth}-01` : new Date().toISOString().slice(0, 10);
-  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const deletionSafety = useDeletionSafety();
   const [showForm, setShowForm] = useState(false);
@@ -38,7 +38,7 @@ export default function Expenses() {
   const [operatingKind, setOperatingKind] = useState<OperatingKind>("staff");
   const [expenseLiabilityMode, setExpenseLiabilityMode] = useState<"building" | "room_shared" | "tenant_assigned">("building");
   const [operatingLiabilityMode, setOperatingLiabilityMode] = useState<"building" | "room_shared" | "tenant_assigned">("building");
-  const refresh = async () => { await utils.pg.operations.snapshot.invalidate(); await utils.pg.dashboard.get.invalidate(); };
+  const refresh = async () => { await invalidateWorkspace(); };
   const create = trpc.pg.expenses.create.useMutation({ onSuccess: async () => { await refresh(); setShowForm(false); toast.success("Expense recorded"); }, onError: error => toast.error(error.message) });
   const deleteExpense = trpc.pg.expenses.delete.useMutation({ onSuccess: async data => { await refresh(); deletionSafety.offerUndo({ auditId: data.auditId, buildingId: buildingId ?? 0, label: "Expense", onRestored: refresh }); }, onError: error => toast.error(error.message) });
   const createCharge = trpc.pg.expenses.serviceChargeCreate.useMutation({ onSuccess: async () => { await refresh(); setShowChargeForm(false); toast.success("Service charge saved"); }, onError: error => toast.error(error.message) });

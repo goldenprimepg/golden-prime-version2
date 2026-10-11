@@ -40,7 +40,7 @@ function TransferProrationPreview({ sourceMonthlyRentPaise, destinationMonthlyRe
 }
 
 export default function Tenants() {
-  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const { requestDelete } = useDeletionSafety();
   const [showAdd, setShowAdd] = useState(false);
@@ -61,7 +61,7 @@ export default function Tenants() {
     return () => window.cancelAnimationFrame(frame);
   }, [editingTenantId]);
 
-  const refresh = async () => { await utils.pg.operations.snapshot.invalidate(); await utils.pg.dashboard.get.invalidate(); };
+  const refresh = async () => { await invalidateWorkspace(); };
   const createTenant = trpc.pg.operations.createTenant.useMutation({ onSuccess: async () => { await refresh(); setShowAdd(false); toast.success("Tenant profile and login created"); }, onError: error => toast.error(error.message) });
   const createTenantForRoom = trpc.pg.operations.createTenantForRoom.useMutation({ onSuccess: async () => { await refresh(); setShowAdd(false); toast.success("Tenant created, allocated to room, and services configured"); }, onError: error => toast.error(error.message) });
   const updateRoom = trpc.pg.operations.updateRoom.useMutation({ onError: error => toast.error(error.message) });

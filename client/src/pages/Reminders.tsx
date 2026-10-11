@@ -12,10 +12,10 @@ const fieldClass = "h-11 w-full rounded-xl border border-border bg-background px
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="block text-sm font-medium"><span className="mb-1.5 block">{label}</span>{children}</label>; }
 
 export default function Reminders() {
-  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, snapshotQuery: snapshot, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils(); const [showForm, setShowForm] = useState(false);
-  const create = trpc.pg.reminders.create.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); await utils.pg.dashboard.get.invalidate(); setShowForm(false); toast.success("Reminder created"); }, onError: error => toast.error(error.message) });
-  const complete = trpc.pg.reminders.complete.useMutation({ onSuccess: async () => { await utils.pg.operations.snapshot.invalidate(); await utils.pg.dashboard.get.invalidate(); toast.success("Reminder marked complete"); }, onError: error => toast.error(error.message) });
+  const create = trpc.pg.reminders.create.useMutation({ onSuccess: async () => { await invalidateWorkspace(); setShowForm(false); toast.success("Reminder created"); }, onError: error => toast.error(error.message) });
+  const complete = trpc.pg.reminders.complete.useMutation({ onSuccess: async () => { await invalidateWorkspace(); toast.success("Reminder marked complete"); }, onError: error => toast.error(error.message) });
   if (buildingsQuery.isLoading) return <LoadingState />; if (!building || !buildingId) return <BuildingEmptyState />; if (snapshot.isLoading || !snapshot.data) return <LoadingState />;
   const submit = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const form = new FormData(event.currentTarget); create.mutate({ buildingId, title: String(form.get("title")), dueDate: String(form.get("dueDate")), tenantId: form.get("tenantId") ? Number(form.get("tenantId")) : null, rentPaymentId: null }); };
   const shareReminder = async (reminder: NonNullable<typeof snapshot.data>["reminders"][number]) => {

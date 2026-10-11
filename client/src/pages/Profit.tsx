@@ -14,14 +14,14 @@ const toPaise = (value: FormDataEntryValue | null) => Math.round(Number(value ||
 function fileToDataUrl(file: File) { return new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onerror = () => reject(new Error("The image could not be read.")); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("The image could not be read.")); reader.readAsDataURL(file); }); }
 
 export default function Profit() {
-  const { buildingsQuery, building, buildingId, setBuildingId } = useActiveBuilding();
+  const { buildingsQuery, building, buildingId, setBuildingId, invalidateWorkspace } = useActiveBuilding();
   const utils = trpc.useUtils();
   const deletionSafety = useDeletionSafety();
   const [month, setMonth] = useState(monthNow);
   const [showSettlement, setShowSettlement] = useState(false);
   const [showGovernmentBill, setShowGovernmentBill] = useState(false);
   const profit = trpc.pg.profit.get.useQuery({ buildingId: buildingId ?? 0, periodKey: month }, { enabled: Boolean(buildingId), placeholderData: prev => prev });
-  const refresh = async () => { await Promise.all([utils.pg.profit.get.invalidate(), utils.pg.dashboard.get.invalidate(), utils.pg.operations.snapshot.invalidate()]); };
+  const refresh = async () => { await invalidateWorkspace(); };
   const upload = trpc.pg.uploads.image.useMutation({ onError: error => toast.error(error.message) });
   const saveSettlement = trpc.pg.profit.saveOwnerSettlement.useMutation({ onSuccess: async () => { await refresh(); setShowSettlement(false); toast.success("Owner settlement saved"); }, onError: error => toast.error(error.message) });
   const deleteSettlement = trpc.pg.profit.deleteOwnerSettlement.useMutation({ onSuccess: async data => { await refresh(); setShowSettlement(false); deletionSafety.offerUndo({ auditId: data.auditId, buildingId: buildingId ?? 0, label: "Owner settlement", onRestored: refresh }); }, onError: error => toast.error(error.message) });
