@@ -59,6 +59,7 @@ function WorkspaceRoutes() {
     <Route path="/reminders" component={Reminders} />
     <Route path="/exports" component={Exports} />
     <Route path="/settings" component={Settings} />
+    <Route path="/owner" component={OwnerOverview} />
     <Route path="/404" component={NotFound} />
     <Route component={NotFound} />
   </Switch></div>;
@@ -66,10 +67,11 @@ function WorkspaceRoutes() {
 
 function AppShell() {
   const { user, loading } = useAuth();
+  const [location] = useLocation();
   if (loading) return <div className="grid min-h-screen place-items-center"><div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" /></div>;
   if (!user) return <Redirect to="/login" />;
   if (user.role === "tenant") return <TenantPortal />;
-  if (user.role === "admin") return <OwnerOverview />;
+  if (user.role === "admin" && (location === "/" || location === "/owner")) return <OwnerOverview />;
   return <BuildingWorkspaceProvider><DashboardLayout><WorkspaceRoutes /></DashboardLayout></BuildingWorkspaceProvider>;
 }
 

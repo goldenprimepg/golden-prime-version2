@@ -82,16 +82,19 @@ export default function Tenants() {
     snapshot.data?.allocations.filter(item => item.status === "active").forEach(item => counts.set(item.roomId, (counts.get(item.roomId) ?? 0) + 1));
     return counts;
   }, [snapshot.data]);
-  const unallocatedActiveTenants = useMemo(() => snapshot.data?.tenants.filter(tenant => tenant.status === "active" && !snapshot.data?.allocations.some(allocation => allocation.tenantId === tenant.id && allocation.status === "active")) ?? [], [snapshot.data]);
+  const unallocatedActiveTenants = useMemo(() => (snapshot.data?.tenants ?? []).filter(tenant => tenant.status === "active" && !(snapshot.data?.allocations ?? []).some(allocation => allocation.tenantId === tenant.id && allocation.status === "active")), [snapshot.data]);
 
   const visibleTenants = useMemo(() => {
     if (!snapshot.data) return [];
     const normalizedSearch = tenantSearch.trim().toLocaleLowerCase();
-    return snapshot.data.tenants.filter(tenant => {
-      const allocation = snapshot.data.allocations.find(item => item.tenantId === tenant.id && item.status === "active");
-      const room = snapshot.data.rooms.find(item => item.id === allocation?.roomId);
+    return (snapshot.data.tenants ?? []).filter(tenant => {
+      const allocation = (snapshot.data.allocations ?? []).find(item => item.tenantId === tenant.id && item.status === "active");
+      const room = (snapshot.data.rooms ?? []).find(item => item.id === allocation?.roomId);
       const matchesRoomType = roomTypeFilter === "all" || room?.roomType === roomTypeFilter;
-      const matchesSearch = normalizedSearch.length === 0 || tenant.fullName.toLocaleLowerCase().includes(normalizedSearch) || tenant.phone.toLocaleLowerCase().includes(normalizedSearch) || room?.number.toLocaleLowerCase().includes(normalizedSearch) === true;
+      const matchesSearch = normalizedSearch.length === 0 ||
+        (tenant.fullName ?? "").toLocaleLowerCase().includes(normalizedSearch) ||
+        (tenant.phone ?? "").toLocaleLowerCase().includes(normalizedSearch) ||
+        String(room?.number ?? "").toLocaleLowerCase().includes(normalizedSearch);
       return matchesRoomType && matchesSearch;
     });
   }, [roomTypeFilter, snapshot.data, tenantSearch]);

@@ -141,7 +141,7 @@ function resolveRoomSettings(input: { roomType: z.infer<typeof roomType>; billin
 export const pgRouter = router({
   recovery: router({
     restore: protectedProcedure.input(z.object({ auditId: z.number().int().positive(), buildingId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager who deleted the record can use immediate undo." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner who deleted the record can use immediate undo." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       try {
         return { success: true, ...(await restoreDeletedEntry({ ...input, restoredBy: ctx.user.id })) };
@@ -153,7 +153,7 @@ export const pgRouter = router({
 
   buildings: router({
     list: protectedProcedure.query(({ ctx }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Use the Owner summary for read-only building information." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Building workspace access is required." });
       return listBuildingsForUser(ctx.user);
     }),
     create: protectedProcedure
@@ -208,12 +208,12 @@ export const pgRouter = router({
       return { success: true };
     }),
     recoveryAccounts: protectedProcedure.input(z.object({ buildingId: z.number().int().positive() })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can access building credential recovery." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can access building credential recovery." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageTenants");
       return listBuildingRecoveryAccounts(input.buildingId);
     }),
     resetBuildingAccountPassword: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), userId: z.number().int().positive(), password: z.string().min(8).max(128) })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can reset a linked account password." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can reset a linked account password." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageTenants");
       await resetBuildingAccountCredentials({ buildingId: input.buildingId, userId: input.userId, passwordHash: hashPassword(input.password), createdBy: ctx.user.id });
       return { success: true };
@@ -224,7 +224,7 @@ export const pgRouter = router({
     get: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), periodMode: z.enum(["monthly", "yearly"]).default("monthly"), periodKey: z.string().regex(/^\d{4}(?:-(0[1-9]|1[0-2]))?$/).optional() }).superRefine((input, context) => {
       if (input.periodKey && ((input.periodMode === "monthly" && !/^\d{4}-(0[1-9]|1[0-2])$/.test(input.periodKey)) || (input.periodMode === "yearly" && !/^\d{4}$/.test(input.periodKey)))) context.addIssue({ code: "custom", message: "Choose a valid reporting month or year.", path: ["periodKey"] });
     })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "The Owner dashboard is intentionally limited to the approved summary." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "The Owner dashboard is intentionally limited to the approved summary." });
       await requireBuildingAccess(ctx.user, input.buildingId, "read");
       const accessibleBuildings = await listBuildingsForUser(ctx.user);
       return getDashboardOverview(input.buildingId, accessibleBuildings.length, input.periodMode, input.periodKey);
@@ -262,30 +262,30 @@ export const pgRouter = router({
 
   profit: router({
     get: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), periodKey: monthString.optional() })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can view the operational profit workspace." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can view the operational profit workspace." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       const accessibleBuildings = await listBuildingsForUser(ctx.user);
       return getManagerProfitWorkspace({ buildingId: input.buildingId, totalBuildings: accessibleBuildings.length, periodMode: "monthly", periodKey: input.periodKey });
     }),
     saveOwnerSettlement: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), billingMonth: monthString, expectedAmountPaise: z.number().int().positive(), paidAmountPaise: z.number().int().min(0), dueDate: dateString, paidOn: optionalDateString, paymentMethod: z.enum(["cash", "upi", "bank_transfer", "cheque"]).optional(), notes: z.string().trim().max(800).optional(), receiptUrl: optionalStoredImageUrl }).refine(input => input.paidAmountPaise <= input.expectedAmountPaise, { message: "Paid amount cannot exceed the Owner settlement amount.", path: ["paidAmountPaise"] })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can record an Owner settlement." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can record an Owner settlement." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       await upsertOwnerSettlement({ ...input, paidOn: input.paidOn || null, paymentMethod: input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, createdBy: ctx.user.id });
       return { success: true };
     }),
     deleteOwnerSettlement: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), id: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect Owner settlement." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect Owner settlement." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       return { success: true, ...(await deleteOwnerSettlement({ ...input, createdBy: ctx.user.id })) };
     }),
     saveGovernmentElectricity: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), billingMonth: monthString, expectedAmountPaise: z.number().int().positive(), paidAmountPaise: z.number().int().min(0), dueDate: dateString, paidOn: optionalDateString, paymentMethod: z.enum(["cash", "upi", "bank_transfer", "cheque"]).optional(), notes: z.string().trim().max(800).optional(), receiptUrl: optionalStoredImageUrl }).refine(input => input.paidAmountPaise <= input.expectedAmountPaise, { message: "Paid amount cannot exceed the government electricity bill.", path: ["paidAmountPaise"] })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can record a government electricity payment." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can record a government electricity payment." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       await upsertGovernmentElectricityPayment({ ...input, paidOn: input.paidOn || null, paymentMethod: input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, createdBy: ctx.user.id });
       return { success: true };
     }),
     deleteGovernmentElectricity: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), id: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect government electricity entry." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect government electricity entry." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       return { success: true, ...(await deleteGovernmentElectricityPayment({ ...input, createdBy: ctx.user.id })) };
     }),
@@ -293,7 +293,7 @@ export const pgRouter = router({
 
   operations: router({
     snapshot: protectedProcedure.input(z.object({ buildingId: z.number().int().positive() })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Operational data is available only in the Manager workspace." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Operational data is available only in the Manager and Owner workspace." });
       await requireBuildingAccess(ctx.user, input.buildingId, "read");
       return getBuildingSnapshot(input.buildingId);
     }),
@@ -505,7 +505,7 @@ export const pgRouter = router({
       return { status };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number().int().positive(), buildingId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect rent record." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect rent record." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageRent");
       return { success: true, ...(await deleteRentPayment({ ...input, createdBy: ctx.user.id })) };
     }),
@@ -556,7 +556,7 @@ export const pgRouter = router({
       return { ...calculation, status, reminderResolved: status === "paid" };
     }),
     delete: protectedProcedure.input(z.object({ id: z.number().int().positive(), buildingId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect electricity bill." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect electricity bill." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageElectricity");
       return { success: true, ...(await deleteElectricityBill({ ...input, createdBy: ctx.user.id })) };
     }),
@@ -580,7 +580,7 @@ export const pgRouter = router({
       }
     }),
     delete: protectedProcedure.input(z.object({ id: z.number().int().positive(), buildingId: z.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager can remove an uncollected tenant charge." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an uncollected tenant charge." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       return { success: true, ...(await deleteTenantCharge({ ...input, createdBy: ctx.user.id })) };
     }),
@@ -707,14 +707,14 @@ export const pgRouter = router({
       paymentStatus: z.enum(["all", "paid", "pending", "partial"]).default("all"),
       outstandingOnly: z.boolean().default(false),
     })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only a building Manager can preview operational workbook fields." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only a building Manager or Owner can preview operational workbook fields." });
       await requireBuildingAccess(ctx.user, input.buildingId, "export");
       if (input.mode === "selected" && input.datasets.length === 0) throw new TRPCError({ code: "BAD_REQUEST", message: "Choose at least one data section to preview." });
       if (!hasValidExportDateRange(input)) throw new TRPCError({ code: "BAD_REQUEST", message: "The start date must be before the end date." });
       return getWorkbookExportPreview(input);
     }),
     csv: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), dataset: z.enum(["rooms", "tenants"]), dateFrom: optionalDateString, dateTo: optionalDateString })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only a building Manager can export room or tenant CSV data." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only a building Manager or Owner can export room or tenant CSV data." });
       await requireBuildingAccess(ctx.user, input.buildingId, "export");
       if (!hasValidExportDateRange(input)) throw new TRPCError({ code: "BAD_REQUEST", message: "The start date must be before the end date." });
       const csv = await getCsvExportData(input);
@@ -731,7 +731,7 @@ export const pgRouter = router({
       outstandingOnly: z.boolean().default(false),
       fieldSelections: z.record(z.string(), z.array(z.string().trim().min(1).max(120)).max(80)).optional(),
     })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError({ code: "FORBIDDEN", message: "Only a building Manager can export operational workbooks." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only a building Manager or Owner can export operational workbooks." });
       await requireBuildingAccess(ctx.user, input.buildingId, "export");
       if (input.mode === "selected" && input.datasets.length === 0) throw new TRPCError({ code: "BAD_REQUEST", message: "Choose at least one data section to export." });
       if (!hasValidExportDateRange(input)) throw new TRPCError({ code: "BAD_REQUEST", message: "The start date must be before the end date." });

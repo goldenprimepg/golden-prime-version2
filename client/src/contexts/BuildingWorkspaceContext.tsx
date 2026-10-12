@@ -8,10 +8,10 @@ import type { inferRouterOutputs } from "@trpc/server";
 import type { AppRouter } from "../../../server/routers";
 
 type BuildingOption = { id: number; name: string; address: string; city: string | null; landmark: string | null; contactPhone: string | null; imageUrl: string | null; mapUrl: string | null; ownerCutPercent: number; ownerMonthlyCutPaise: number; paymentBankName: string | null; paymentAccountName: string | null; paymentAccountNumber: string | null; paymentIfsc: string | null; paymentUpiId: string | null; paymentQrUrl: string | null; electricityRatePaise: number; rentDueDay: number };
-type WorkspaceQuery = { data?: BuildingOption[]; isLoading: boolean };
+type WorkspaceQuery = { data?: BuildingOption[]; isLoading: boolean; isError?: boolean; error?: unknown; refetch?: () => void };
 type RouterOutput = inferRouterOutputs<AppRouter>;
 type WorkspaceSnapshotData = RouterOutput["pg"]["operations"]["snapshot"];
-type WorkspaceSnapshotQuery = { data: WorkspaceSnapshotData; isLoading: boolean };
+type WorkspaceSnapshotQuery = { data: WorkspaceSnapshotData; isLoading: boolean; isError?: boolean; error?: unknown; refetch?: () => void };
 type BuildingWorkspaceValue = {
   buildingsQuery: WorkspaceQuery;
   buildingId: number | null;
@@ -43,11 +43,15 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   const buildingsQuery: WorkspaceQuery = useMemo(() => ({
     data: resolvedBuildings,
     isLoading: !resolvedBuildings && isOnline && liveBuildingsQuery.isLoading,
-  }), [isOnline, liveBuildingsQuery.isLoading, resolvedBuildings]);
+    isError: liveBuildingsQuery.isError,
+    error: liveBuildingsQuery.error,
+    refetch: () => void liveBuildingsQuery.refetch(),
+  }), [isOnline, liveBuildingsQuery.error, liveBuildingsQuery.isError, liveBuildingsQuery.isLoading, resolvedBuildings]);
 
   useEffect(() => {
-    if (buildingsQuery.isLoading) return;
-    const available = buildingsQuery.data ?? [];
+    // Crucial: Never clear stored buildingId while query is still loading or data has not yet resolved
+    if (buildingsQuery.isLoading || buildingsQuery.data === undefined) return;
+    const available = buildingsQuery.data;
     if (available.length === 0) {
       setBuildingIdState(null);
       window.localStorage.removeItem(STORAGE_KEY);
@@ -71,15 +75,18 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   const snapshotData = liveWorkspaceSnapshot.data ?? (offlineSnapshot?.data as WorkspaceSnapshotData | undefined);
   const isRefreshing = !snapshotData && (liveBuildingsQuery.isFetching || liveWorkspaceSnapshot.isFetching);
   const snapshotQuery: WorkspaceSnapshotQuery = useMemo(() => {
-    const isActivelyLoading = !snapshotData && (
+    const isActivelyLoading = !snapshotData && !liveWorkspaceSnapshot.isError && (
       buildingsQuery.isLoading ||
       (Boolean(buildingId) && isOnline && liveWorkspaceSnapshot.isLoading)
     );
     return {
       data: snapshotData as WorkspaceSnapshotData,
       isLoading: isActivelyLoading,
+      isError: liveWorkspaceSnapshot.isError,
+      error: liveWorkspaceSnapshot.error,
+      refetch: () => void liveWorkspaceSnapshot.refetch(),
     };
-  }, [buildingId, buildingsQuery.isLoading, isOnline, liveWorkspaceSnapshot.isLoading, snapshotData]);
+  }, [buildingId, buildingsQuery.isLoading, isOnline, liveWorkspaceSnapshot.error, liveWorkspaceSnapshot.isError, liveWorkspaceSnapshot.isLoading, snapshotData]);
 
   const invalidateWorkspace = async (targetId?: number) => {
     const id = targetId ?? buildingId;

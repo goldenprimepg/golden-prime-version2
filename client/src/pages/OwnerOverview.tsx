@@ -66,7 +66,12 @@ export default function OwnerOverview() {
             <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary/10 text-primary"><Building2 className="h-4 w-4" /></span>
             <div><p className="text-sm font-semibold text-primary">Golden Prime PG</p><p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Owner summary</p></div>
           </div>
-          <div className="flex items-center gap-2"><button type="button" onClick={() => setShowMotionPreferences(value => !value)} className="h-9 rounded-xl border border-border bg-card px-3 text-xs font-semibold text-muted-foreground">Motion</button><button type="button" onClick={() => setShowAccountForm(value => !value)} className="h-9 rounded-xl border border-primary/20 bg-primary/[0.04] px-3 text-xs font-semibold text-primary">Login details</button><button onClick={signOut} className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-border bg-card px-3 text-xs font-semibold text-muted-foreground"><LogOut className="h-3.5 w-3.5" />Sign out</button></div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setLocation("/buildings")} className="h-9 rounded-xl border border-primary/20 bg-primary/[0.08] px-3 text-xs font-semibold text-primary">Manage Operations</button>
+            <button type="button" onClick={() => setShowMotionPreferences(value => !value)} className="h-9 rounded-xl border border-border bg-card px-3 text-xs font-semibold text-muted-foreground">Motion</button>
+            <button type="button" onClick={() => setShowAccountForm(value => !value)} className="h-9 rounded-xl border border-primary/20 bg-primary/[0.04] px-3 text-xs font-semibold text-primary">Login details</button>
+            <button onClick={signOut} className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-border bg-card px-3 text-xs font-semibold text-muted-foreground"><LogOut className="h-3.5 w-3.5" />Sign out</button>
+          </div>
         </div>
       </header>
 

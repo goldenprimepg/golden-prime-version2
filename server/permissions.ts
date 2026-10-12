@@ -13,7 +13,18 @@ export type BuildingAction =
   | "export";
 
 const permissions: Record<AppRole, Set<BuildingAction>> = {
-  admin: new Set<BuildingAction>(),
+  admin: new Set<BuildingAction>([
+    "read",
+    "manageBuildings",
+    "manageRooms",
+    "manageTenants",
+    "manageRent",
+    "manageElectricity",
+    "manageExpenses",
+    "manageReminders",
+    "manageStaff",
+    "export",
+  ]),
   manager: new Set<BuildingAction>([
     "read",
     "manageBuildings",
