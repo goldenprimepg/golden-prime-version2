@@ -666,11 +666,12 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
           rawSql = __EMBEDDED_SCHEMA_SQL__;
         } else {
           const candidates = [
+            process.env.LAMBDA_TASK_ROOT ? path.resolve(process.env.LAMBDA_TASK_ROOT, "supabase", "schema.sql") : "",
             path.resolve(process.cwd(), "supabase", "schema.sql"),
             path.resolve(process.cwd(), "..", "supabase", "schema.sql"),
             path.resolve(import.meta.dirname, "..", "supabase", "schema.sql"),
             path.resolve(import.meta.dirname, "supabase", "schema.sql"),
-          ];
+          ].filter(Boolean);
           for (const cand of candidates) {
             try {
               if (fs.existsSync(cand)) {
@@ -771,7 +772,7 @@ export async function getDb(): Promise<DatabaseConnection | null> {
       const pool = new Pool({
         connectionString,
         max,
-        connectionTimeoutMillis: 5_000,
+        connectionTimeoutMillis: 10_000,
         idleTimeoutMillis: 30_000,
         allowExitOnIdle: true,
         ssl: { rejectUnauthorized: false },
