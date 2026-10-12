@@ -539,7 +539,7 @@ var init_schema = __esm({
 });
 
 // server/domain.ts
-function deriveRentStatus2(expectedAmountPaise, paidAmountPaise) {
+function deriveRentStatus(expectedAmountPaise, paidAmountPaise) {
   if (!Number.isInteger(expectedAmountPaise) || expectedAmountPaise <= 0) {
     throw new Error("Expected rent must be a positive whole number of paise.");
   }
@@ -693,14 +693,14 @@ import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or } from 
 import { drizzle as drizzlePostgres } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { PGlite } from "@electric-sql/pglite";
-import { randomBytes, scryptSync } from "node:crypto";
+import { scryptSync } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { Pool } from "pg";
 function hashSeedPassword(password) {
   const existing = cachedPasswordHashes.get(password);
   if (existing) return existing;
-  const salt = randomBytes(16).toString("hex");
+  const salt = "676f6c64656e7072696d657365656431";
   const derived = scryptSync(password, salt, 64).toString("hex");
   const hashed = `${salt}:${derived}`;
   cachedPasswordHashes.set(password, hashed);
@@ -782,21 +782,27 @@ async function ensureCoreSeedAccounts(db) {
       role: "tenant"
     }
   ];
-  const existingUsers = await db.select({ id: users.id, openId: users.openId, phone: users.phone }).from(users);
+  const existingUsers = await db.select({ id: users.id, openId: users.openId, phone: users.phone, name: users.name, role: users.role, passwordHash: users.passwordHash }).from(users);
+  const missingAccounts = [];
   for (const account of coreAccounts) {
     const match = existingUsers.find((u) => u.openId === account.openId || account.phone && u.phone === account.phone);
     if (match) {
-      await db.update(users).set({
-        name: account.name,
-        email: account.email,
-        phone: account.phone,
-        passwordHash: account.passwordHash,
-        loginMethod: "phone-password",
-        role: account.role
-      }).where(eq(users.id, match.id));
+      if (!match.passwordHash || match.role !== account.role || match.phone !== account.phone || match.name !== account.name) {
+        await db.update(users).set({
+          name: account.name,
+          email: account.email,
+          phone: account.phone,
+          passwordHash: match.passwordHash || account.passwordHash,
+          loginMethod: "phone-password",
+          role: account.role
+        }).where(eq(users.id, match.id));
+      }
     } else {
-      await db.insert(users).values(account).onConflictDoNothing();
+      missingAccounts.push(account);
     }
+  }
+  if (missingAccounts.length > 0) {
+    await db.insert(users).values(missingAccounts).onConflictDoNothing();
   }
 }
 async function seedEmbeddedDatabase(db, pglite) {
@@ -2480,13 +2486,16 @@ async function resetEmbeddedDatabase() {
   forceInMemoryEmbedded = true;
   return initEmbeddedPglite();
 }
+function isUsingEmbeddedFallback() {
+  return usingEmbeddedFallback;
+}
 async function getDb() {
   if (cachedDb) return cachedDb;
   if (dbConnectPromise) return dbConnectPromise;
   dbConnectPromise = (async () => {
     try {
       const connectionString = process.env.SUPABASE_DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.POSTGRES_PRISMA_URL ?? process.env.POSTGRES_URL_NON_POOLING;
-      if (!connectionString || usingEmbeddedFallback) {
+      if (!connectionString || connectionString.includes("<") || connectionString.includes(">") || usingEmbeddedFallback) {
         usingEmbeddedFallback = true;
         return await initEmbeddedPglite();
       }
@@ -2522,6 +2531,15 @@ async function requireDb() {
   const db = await getDb();
   if (!db) throw new Error("Database connection is unavailable.");
   return db;
+}
+function clearBuildingSnapshotCache(buildingId) {
+  if (buildingId) {
+    snapshotCache.delete(buildingId);
+    inFlightSnapshots.delete(buildingId);
+  } else {
+    snapshotCache.clear();
+    inFlightSnapshots.clear();
+  }
 }
 function formatRentMonth(date2) {
   return date2.toISOString().slice(0, 7);
@@ -2588,6 +2606,8 @@ async function ensureMonthlyRentCycles(input) {
     }
   }
   await ensureMonthlyTenantServiceCharges(input);
+  if (input.buildingId) clearBuildingSnapshotCache(input.buildingId);
+  else clearBuildingSnapshotCache();
   return { created, rentMonth: input.rentMonth };
 }
 async function refreshManagerCollectionNotifications(input) {
@@ -2816,27 +2836,39 @@ async function getUserByOpenId(openId) {
   return result[0];
 }
 async function getUserById(id) {
+  const cached = userCacheById.get(id);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
   let db = await getDb();
   if (!db) return void 0;
   try {
-    return (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+    const user = (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+    userCacheById.set(id, { user, expiresAt: Date.now() + 2e4 });
+    return user;
   } catch (error) {
     if (String(error).includes("Aborted")) {
       db = await resetEmbeddedDatabase();
-      return (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+      const user = (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+      userCacheById.set(id, { user, expiresAt: Date.now() + 2e4 });
+      return user;
     }
     throw error;
   }
 }
 async function getUserByPhone(phone) {
+  const cached = userCacheByPhone.get(phone);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
   let db = await getDb();
   if (!db) return void 0;
   try {
-    return (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+    const user = (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+    userCacheByPhone.set(phone, { user, expiresAt: Date.now() + 2e4 });
+    return user;
   } catch (error) {
     if (String(error).includes("Aborted")) {
       db = await resetEmbeddedDatabase();
-      return (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+      const user = (await db.select().from(users).where(eq(users.phone, phone)).limit(1))[0];
+      userCacheByPhone.set(phone, { user, expiresAt: Date.now() + 2e4 });
+      return user;
     }
     throw error;
   }
@@ -2887,11 +2919,13 @@ async function createBuilding(input) {
   const db = await requireDb();
   const [result] = await db.insert(buildings).values({ ...input, city: input.city || null, landmark: input.landmark || null, contactPhone: input.contactPhone || null, imageUrl: input.imageUrl || null, mapUrl: input.mapUrl || null, ownerCutPercent: input.ownerCutPercent ?? 0, ownerMonthlyCutPaise: input.ownerMonthlyCutPaise ?? 0 }).returning({ id: buildings.id });
   if (!result) throw new Error("Building could not be created.");
+  clearBuildingSnapshotCache();
   return result.id;
 }
 async function updateBuilding(input) {
   const db = await requireDb();
   await db.update(buildings).set({ name: input.name, address: input.address, city: input.city, landmark: input.landmark, contactPhone: input.contactPhone, imageUrl: input.imageUrl, mapUrl: input.mapUrl, ownerCutPercent: input.ownerCutPercent, ownerMonthlyCutPaise: input.ownerMonthlyCutPaise, paymentBankName: input.paymentBankName, paymentAccountName: input.paymentAccountName, paymentAccountNumber: input.paymentAccountNumber, paymentIfsc: input.paymentIfsc, paymentUpiId: input.paymentUpiId, paymentQrUrl: input.paymentQrUrl, electricityRatePaise: input.electricityRatePaise }).where(eq(buildings.id, input.id));
+  clearBuildingSnapshotCache(input.id);
 }
 function getBuildingDeletionBlockReason(dependencies) {
   return Object.values(dependencies).some((count) => count > 0) ? "This building cannot be deleted while floors, rooms, tenants, billing, expenses, operating costs, or reminders exist. Remove operational records first." : null;
@@ -2919,6 +2953,7 @@ async function deleteBuilding(buildingId) {
   if (blockReason) throw new Error(blockReason);
   await db.delete(staffAssignments).where(eq(staffAssignments.buildingId, buildingId));
   await db.delete(buildings).where(eq(buildings.id, buildingId));
+  clearBuildingSnapshotCache(buildingId);
 }
 function buildGeneratedFloors(floorCount) {
   if (!Number.isInteger(floorCount) || floorCount < 0 || floorCount > 200) throw new Error("Floor count must be a whole number between 0 and 200.");
@@ -2931,6 +2966,7 @@ function buildGeneratedFloors(floorCount) {
 async function addFloor(input) {
   const db = await requireDb();
   await db.insert(floors).values(input);
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function addGeneratedFloors(input) {
   const db = await requireDb();
@@ -2939,6 +2975,7 @@ async function addGeneratedFloors(input) {
     const existing = await tx.select({ name: floors.name, level: floors.level }).from(floors).where(eq(floors.buildingId, input.buildingId));
     const missing = desired.filter((item) => !existing.some((row) => row.name === item.name && row.level === item.level));
     if (missing.length > 0) await tx.insert(floors).values(missing.map((item) => ({ ...item, buildingId: input.buildingId })));
+    clearBuildingSnapshotCache(input.buildingId);
     return { createdCount: missing.length, totalCount: desired.length };
   });
 }
@@ -2951,10 +2988,12 @@ async function deleteFloor(input) {
   const blockReason = getFloorDeletionBlockReason(roomRows.length);
   if (blockReason) throw new Error(blockReason);
   await db.delete(floors).where(and(eq(floors.id, input.id), eq(floors.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function addRoom(input) {
   const db = await requireDb();
   await db.insert(rooms).values(input);
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function createRoomWithTenantSetup(input) {
   const db = await requireDb();
@@ -2978,11 +3017,13 @@ async function createRoomWithTenantSetup(input) {
   });
   await ensureMonthlyRentCycles({ rentMonth: formatRentMonth(/* @__PURE__ */ new Date()), buildingId: input.buildingId, roomId, createdBy: null });
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId });
+  clearBuildingSnapshotCache(input.buildingId);
   return { roomId, tenantId, allocationId };
 }
 async function updateRoom(input) {
   const db = await requireDb();
   await db.update(rooms).set({ floorId: input.floorId, number: input.number, capacity: input.capacity, roomType: input.roomType, billingMode: input.billingMode, airConditioning: input.airConditioning, balcony: input.balcony, imageUrl: input.imageUrl, defaultRentPaise: input.defaultRentPaise }).where(and(eq(rooms.id, input.id), eq(rooms.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function deleteRoom(input) {
   const db = await requireDb();
@@ -2993,6 +3034,7 @@ async function deleteRoom(input) {
   const blockReason = getRoomDeletionBlockReason({ allocations: allocationRows.length, electricityBills: electricityRows.length });
   if (blockReason) throw new Error(blockReason);
   await db.delete(rooms).where(and(eq(rooms.id, input.id), eq(rooms.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function createTenant(input) {
   const db = await requireDb();
@@ -3000,6 +3042,7 @@ async function createTenant(input) {
   if (!userResult) throw new Error("Tenant login could not be created.");
   const userId = userResult.id;
   await db.insert(tenants).values({ buildingId: input.buildingId, userId, fullName: input.fullName, phone: input.phone, email: input.email, emergencyContactName: input.emergencyContactName, emergencyContactPhone: input.emergencyContactPhone, address: input.address, identityDocumentUrl: input.identityDocumentUrl });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateTenant(input) {
   const db = await requireDb();
@@ -3009,6 +3052,7 @@ async function updateTenant(input) {
     await tx.update(tenants).set({ fullName: input.fullName, phone: input.phone, email: input.email, emergencyContactName: input.emergencyContactName, emergencyContactPhone: input.emergencyContactPhone, address: input.address, identityDocumentUrl: input.identityDocumentUrl, status: input.status }).where(and(eq(tenants.id, input.id), eq(tenants.buildingId, input.buildingId)));
     if (tenant.userId) await tx.update(users).set({ phone: input.phone }).where(eq(users.id, tenant.userId));
   });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function resetTenantCredentials(input) {
   const db = await requireDb();
@@ -3018,6 +3062,7 @@ async function resetTenantCredentials(input) {
     if (tenant.status !== "active") throw new Error("Activate the tenant profile before resetting its login.");
     await tx.update(users).set({ passwordHash: input.passwordHash, loginMethod: "phone-password" }).where(eq(users.id, tenant.userId));
   });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function revokeTenantCredentials(input) {
   const db = await requireDb();
@@ -3025,6 +3070,7 @@ async function revokeTenantCredentials(input) {
   if (!tenant) throw new Error("Tenant not found in the selected building.");
   if (tenant.userId) await db.update(users).set({ passwordHash: null, loginMethod: "revoked" }).where(eq(users.id, tenant.userId));
   await db.update(tenants).set({ status: "inactive" }).where(and(eq(tenants.id, input.tenantId), eq(tenants.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function archiveTenant(input) {
   const db = await requireDb();
@@ -3033,6 +3079,7 @@ async function archiveTenant(input) {
   await db.update(roomAllocations).set({ status: "vacated", moveOutDate: input.moveOutDate, activeTenantId: null }).where(and(eq(roomAllocations.tenantId, input.tenantId), eq(roomAllocations.buildingId, input.buildingId), eq(roomAllocations.status, "active")));
   if (tenant.userId) await db.update(users).set({ passwordHash: null, loginMethod: "revoked" }).where(eq(users.id, tenant.userId));
   await db.update(tenants).set({ status: "inactive" }).where(and(eq(tenants.id, input.tenantId), eq(tenants.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function deleteTenant(input) {
   const db = await requireDb();
@@ -3048,20 +3095,24 @@ async function deleteTenant(input) {
   if (blockReason) throw new Error(blockReason);
   await db.delete(tenants).where(and(eq(tenants.id, input.tenantId), eq(tenants.buildingId, input.buildingId)));
   if (tenantRow[0].userId) await db.delete(users).where(eq(users.id, tenantRow[0].userId));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function createTenantService(input) {
   const db = await requireDb();
   await db.insert(tenantServices).values(input);
   await ensureMonthlyRentCycles({ rentMonth: formatRentMonth(/* @__PURE__ */ new Date()), buildingId: input.buildingId, createdBy: input.createdBy });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateTenantService(input) {
   const db = await requireDb();
   await db.update(tenantServices).set({ serviceType: input.serviceType, monthlyChargePaise: input.monthlyChargePaise, active: input.active, notes: input.notes }).where(and(eq(tenantServices.id, input.id), eq(tenantServices.buildingId, input.buildingId), eq(tenantServices.tenantId, input.tenantId)));
   if (input.active === "active") await ensureMonthlyRentCycles({ rentMonth: formatRentMonth(/* @__PURE__ */ new Date()), buildingId: input.buildingId, createdBy: null });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function deleteTenantService(input) {
   const db = await requireDb();
   await db.delete(tenantServices).where(and(eq(tenantServices.id, input.id), eq(tenantServices.buildingId, input.buildingId), eq(tenantServices.tenantId, input.tenantId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function createAllocation(input) {
   const db = await requireDb();
@@ -3082,6 +3133,7 @@ async function createAllocation(input) {
   const rentMonth = formatRentMonth(/* @__PURE__ */ new Date());
   await ensureMonthlyRentCycles({ rentMonth, buildingId: input.buildingId, roomId: input.roomId, createdBy: null });
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId: input.roomId });
+  clearBuildingSnapshotCache(input.buildingId);
   return allocationId;
 }
 async function createAllocationWithServices(input) {
@@ -3091,6 +3143,7 @@ async function createAllocationWithServices(input) {
     await db.insert(tenantServices).values(input.services.map((service) => ({ ...service, buildingId: input.buildingId, tenantId: input.tenantId })));
     await ensureMonthlyRentCycles({ rentMonth: formatRentMonth(/* @__PURE__ */ new Date()), buildingId: input.buildingId, roomId: input.roomId, allocationId, createdBy: input.services[0]?.createdBy ?? null });
   }
+  clearBuildingSnapshotCache(input.buildingId);
   return allocationId;
 }
 async function createTenantWithAllocationAndServices(input) {
@@ -3117,6 +3170,7 @@ async function createTenantWithAllocationAndServices(input) {
   });
   await ensureMonthlyRentCycles({ rentMonth: formatRentMonth(/* @__PURE__ */ new Date()), buildingId: input.buildingId, roomId: input.roomId, createdBy: null });
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId: input.roomId });
+  clearBuildingSnapshotCache(input.buildingId);
   return { tenantId, allocationId };
 }
 async function vacateAllocation(input) {
@@ -3125,6 +3179,7 @@ async function vacateAllocation(input) {
   if (!allocation) throw new Error("Active allocation not found in the selected building.");
   await db.update(roomAllocations).set({ status: "vacated", moveOutDate: input.moveOutDate, activeTenantId: null }).where(and(eq(roomAllocations.id, input.allocationId), eq(roomAllocations.buildingId, input.buildingId), eq(roomAllocations.status, "active")));
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId: allocation.roomId });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateAllocation(input) {
   const db = await requireDb();
@@ -3135,6 +3190,7 @@ async function updateAllocation(input) {
   await ensureMonthlyRentCycles({ rentMonth, buildingId: input.buildingId, roomId: allocation.roomId, createdBy: null });
   await syncAutoGeneratedAllocationRent({ allocationId: input.id, buildingId: input.buildingId, rentMonth, monthlyRentPaise: input.monthlyRentPaise });
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId: allocation.roomId });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function transferActiveTenant(input) {
   const db = await requireDb();
@@ -3172,6 +3228,7 @@ async function transferActiveTenant(input) {
   });
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId: sourceRoomId });
   await syncRoomRentTotal({ buildingId: input.buildingId, roomId: input.destinationRoomId });
+  clearBuildingSnapshotCache(input.buildingId);
   return { destinationAllocationId, sourceRoomId, proration };
 }
 async function recordRentPayment(input) {
@@ -3195,6 +3252,7 @@ async function recordRentPayment(input) {
   if (!payment[0]) throw new Error("Rent payment was not saved.");
   await syncRentPaymentReminder({ id: payment[0].id, buildingId: input.buildingId, tenantId: input.tenantId, rentMonth: input.rentMonth, dueDate: input.dueDate, status: input.status, createdBy: input.recordedBy });
   if (input.status === "paid") await resolveManagerCollectionNotifications(input.buildingId, [`rent-upcoming-${payment[0].id}`, `rent-overdue-${payment[0].id}`]);
+  clearBuildingSnapshotCache(input.buildingId);
   return payment[0];
 }
 async function updateRentPayment(input) {
@@ -3205,6 +3263,7 @@ async function updateRentPayment(input) {
   if (!payment[0]) throw new Error("Rent payment was not found.");
   await syncRentPaymentReminder({ id: input.id, buildingId: input.buildingId, tenantId: payment[0].tenantId, rentMonth: payment[0].rentMonth, dueDate: input.dueDate, status: input.status, createdBy: input.recordedBy });
   if (input.status === "paid") await resolveManagerCollectionNotifications(input.buildingId, [`rent-upcoming-${input.id}`, `rent-overdue-${input.id}`]);
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function getUnnotifiedOverdueRentPayments(today) {
   const db = await requireDb();
@@ -3252,6 +3311,7 @@ async function recordElectricityBill(input) {
   if (!bill) throw new Error("Electricity bill was not saved.");
   await syncElectricityTenantCharges({ billId: bill.id, buildingId: input.buildingId, roomId: input.roomId, billingMonth: input.billingMonth, billAmountPaise: input.billAmountPaise, paidAmountPaise: input.paidAmountPaise, paidOn: input.paidOn, paymentMethod: input.paymentMethod, receiptUrl: input.receiptUrl, dueDate: input.dueDate, notes: input.notes, createdBy: input.recordedBy });
   if (input.status === "paid") await resolveManagerCollectionNotifications(input.buildingId, [`electricity-upcoming-${bill.id}`, `electricity-overdue-${bill.id}`]);
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateElectricityBill(input) {
   const db = await requireDb();
@@ -3265,6 +3325,7 @@ async function updateElectricityBill(input) {
     await db.update(reminders).set({ status: "complete" }).where(and(eq(reminders.buildingId, input.buildingId), eq(reminders.title, title), eq(reminders.status, "active")));
     await resolveManagerCollectionNotifications(input.buildingId, [`electricity-upcoming-${input.id}`, `electricity-overdue-${input.id}`]);
   }
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function recordTenantChargePayment(input) {
   const db = await requireDb();
@@ -3282,6 +3343,7 @@ async function recordTenantChargePayment(input) {
       await db.update(electricityBills).set({ paidAmountPaise, status: electricityStatus, paidOn: electricityStatus === "pending" ? null : input.paidOn ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) }).where(and(eq(electricityBills.id, charge.sourceId), eq(electricityBills.buildingId, input.buildingId)));
     }
   }
+  clearBuildingSnapshotCache(input.buildingId);
   return { status };
 }
 async function createElectricityOverdueReminder(input) {
@@ -3302,16 +3364,18 @@ async function createExpense(input) {
   if (!result) throw new Error("Expense could not be created.");
   const expenseId = result.id;
   await syncTenantCharges({ buildingId: input.buildingId, roomId: input.roomId, tenantId: input.tenantId, liabilityMode: input.liabilityMode, sourceType: "expense", sourceId: expenseId, billingMonth: input.expenseDate.slice(0, 7), title: `${input.category.replace(/\b\w/g, (letter) => letter.toUpperCase())} expense`, amountPaise: input.amountPaise, dueDate: input.expenseDate, notes: input.notes, createdBy: input.createdBy });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateExpense(input) {
   const db = await requireDb();
   const result = await db.update(expenses).set({ roomId: input.roomId, tenantId: input.tenantId, liabilityMode: input.liabilityMode, category: input.category, amountPaise: input.amountPaise, expenseDate: input.expenseDate, notes: input.notes, receiptUrl: input.receiptUrl, createdBy: input.createdBy }).where(and(eq(expenses.id, input.id), eq(expenses.buildingId, input.buildingId), eq(expenses.updatedAt, input.expectedUpdatedAt))).returning({ id: expenses.id });
   if (result.length !== 1) throw new Error("This expense changed on another device. Review the latest record before saving again.");
   await syncTenantCharges({ buildingId: input.buildingId, roomId: input.roomId, tenantId: input.tenantId, liabilityMode: input.liabilityMode, sourceType: "expense", sourceId: input.id, billingMonth: input.expenseDate.slice(0, 7), title: `${input.category.replace(/\b\w/g, (letter) => letter.toUpperCase())} expense`, amountPaise: input.amountPaise, dueDate: input.expenseDate, notes: input.notes, createdBy: input.createdBy });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function deleteExpense(input) {
   const db = await requireDb();
-  return await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const expense = (await tx.select().from(expenses).where(and(eq(expenses.id, input.id), eq(expenses.buildingId, input.buildingId))).limit(1))[0];
     if (!expense) throw new Error("Expense was not found in the selected building.");
     const charges = await tx.select().from(tenantCharges).where(and(eq(tenantCharges.sourceType, "expense"), eq(tenantCharges.sourceId, input.id), eq(tenantCharges.buildingId, input.buildingId)));
@@ -3322,6 +3386,8 @@ async function deleteExpense(input) {
     await tx.delete(expenses).where(and(eq(expenses.id, input.id), eq(expenses.buildingId, input.buildingId)));
     return { auditId: audit.id };
   });
+  clearBuildingSnapshotCache(input.buildingId);
+  return result;
 }
 function deriveOperatingCostStatus(amountPaise, paidAmountPaise) {
   return paidAmountPaise >= amountPaise ? "paid" : paidAmountPaise > 0 ? "partial" : "pending";
@@ -3332,16 +3398,18 @@ async function createOperatingCost(input) {
   if (!result) throw new Error("Operating cost could not be created.");
   const operatingCostId = result.id;
   await syncTenantCharges({ buildingId: input.buildingId, roomId: input.roomId, tenantId: input.tenantId, liabilityMode: input.liabilityMode, sourceType: "operating_cost", sourceId: operatingCostId, billingMonth: input.costDate.slice(0, 7), title: input.title, amountPaise: input.amountPaise, dueDate: input.dueDate, notes: input.notes, createdBy: input.createdBy });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateOperatingCost(input) {
   const db = await requireDb();
   const result = await db.update(operatingCosts).set({ roomId: input.roomId, tenantId: input.tenantId, liabilityMode: input.liabilityMode, kind: input.kind, category: input.category, title: input.title, payeeName: input.payeeName, vendorName: input.vendorName, amountPaise: input.amountPaise, paidAmountPaise: input.paidAmountPaise, status: deriveOperatingCostStatus(input.amountPaise, input.paidAmountPaise), workStatus: input.workStatus, costDate: input.costDate, dueDate: input.dueDate, receiptUrl: input.receiptUrl, notes: input.notes, createdBy: input.createdBy }).where(and(eq(operatingCosts.id, input.id), eq(operatingCosts.buildingId, input.buildingId), eq(operatingCosts.updatedAt, input.expectedUpdatedAt))).returning({ id: operatingCosts.id });
   if (result.length !== 1) throw new Error("This operating cost changed on another device. Review the latest record before saving again.");
   await syncTenantCharges({ buildingId: input.buildingId, roomId: input.roomId, tenantId: input.tenantId, liabilityMode: input.liabilityMode, sourceType: "operating_cost", sourceId: input.id, billingMonth: input.costDate.slice(0, 7), title: input.title, amountPaise: input.amountPaise, dueDate: input.dueDate, notes: input.notes, createdBy: input.createdBy });
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function deleteOperatingCost(input) {
   const db = await requireDb();
-  return await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const operatingCost = (await tx.select().from(operatingCosts).where(and(eq(operatingCosts.id, input.id), eq(operatingCosts.buildingId, input.buildingId))).limit(1))[0];
     if (!operatingCost) throw new Error("Operating cost was not found in the selected building.");
     const charges = await tx.select().from(tenantCharges).where(and(eq(tenantCharges.sourceType, "operating_cost"), eq(tenantCharges.sourceId, input.id), eq(tenantCharges.buildingId, input.buildingId)));
@@ -3352,10 +3420,12 @@ async function deleteOperatingCost(input) {
     await tx.delete(operatingCosts).where(and(eq(operatingCosts.id, input.id), eq(operatingCosts.buildingId, input.buildingId)));
     return { auditId: audit.id };
   });
+  clearBuildingSnapshotCache(input.buildingId);
+  return result;
 }
 async function deleteRentPayment(input) {
   const db = await requireDb();
-  return await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const payment = (await tx.select().from(rentPayments).where(and(eq(rentPayments.id, input.id), eq(rentPayments.buildingId, input.buildingId))).limit(1))[0];
     if (!payment) throw new Error("Rent record was not found in the selected building.");
     const paymentReminders = await tx.select().from(reminders).where(and(eq(reminders.rentPaymentId, input.id), eq(reminders.buildingId, input.buildingId)));
@@ -3365,10 +3435,12 @@ async function deleteRentPayment(input) {
     await tx.delete(rentPayments).where(and(eq(rentPayments.id, input.id), eq(rentPayments.buildingId, input.buildingId)));
     return { auditId: audit.id };
   });
+  clearBuildingSnapshotCache(input.buildingId);
+  return result;
 }
 async function deleteElectricityBill(input) {
   const db = await requireDb();
-  return await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const bill = (await tx.select().from(electricityBills).where(and(eq(electricityBills.id, input.id), eq(electricityBills.buildingId, input.buildingId))).limit(1))[0];
     if (!bill) throw new Error("Electricity bill was not found in the selected building.");
     const charges = await tx.select().from(tenantCharges).where(and(eq(tenantCharges.sourceType, "electricity"), eq(tenantCharges.sourceId, input.id), eq(tenantCharges.buildingId, input.buildingId)));
@@ -3379,10 +3451,12 @@ async function deleteElectricityBill(input) {
     await tx.delete(electricityBills).where(and(eq(electricityBills.id, input.id), eq(electricityBills.buildingId, input.buildingId)));
     return { auditId: audit.id };
   });
+  clearBuildingSnapshotCache(input.buildingId);
+  return result;
 }
 async function deleteTenantCharge(input) {
   const db = await requireDb();
-  return await db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const charge = (await tx.select().from(tenantCharges).where(and(eq(tenantCharges.id, input.id), eq(tenantCharges.buildingId, input.buildingId))).limit(1))[0];
     if (!charge) throw new Error("Tenant collection was not found in the selected building.");
     if (charge.paidAmountPaise > 0) throw new Error("This tenant collection has recorded payment. Correct the payment amount instead of deleting it.");
@@ -3391,6 +3465,8 @@ async function deleteTenantCharge(input) {
     await tx.delete(tenantCharges).where(and(eq(tenantCharges.id, input.id), eq(tenantCharges.buildingId, input.buildingId)));
     return { auditId: audit.id };
   });
+  clearBuildingSnapshotCache(input.buildingId);
+  return result;
 }
 function reviveSnapshotTimestamps(record) {
   const restored = { ...record };
@@ -3505,48 +3581,66 @@ async function restoreDeletedEntry(input) {
     }
     await tx.update(changeAuditLogs).set({ action: "deleted_undone" }).where(eq(changeAuditLogs.id, audit.id));
     await tx.insert(changeAuditLogs).values({ buildingId: input.buildingId, entityType: audit.entityType, entityId: audit.entityId, action: "restored", snapshotJson: audit.snapshotJson, createdBy: input.restoredBy });
+    clearBuildingSnapshotCache(input.buildingId);
     return { restoredLabel };
   });
 }
 async function createServiceCharge(input) {
   const db = await requireDb();
   await db.insert(serviceCharges).values(input);
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function updateServiceCharge(input) {
   const db = await requireDb();
   await db.update(serviceCharges).set({ name: input.name, amountPaise: input.amountPaise, billingCycle: input.billingCycle, dueDay: input.dueDay, active: input.active, notes: input.notes }).where(and(eq(serviceCharges.id, input.id), eq(serviceCharges.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function deleteServiceCharge(input) {
   const db = await requireDb();
   await db.delete(serviceCharges).where(and(eq(serviceCharges.id, input.id), eq(serviceCharges.buildingId, input.buildingId)));
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function createReminder(input) {
   const db = await requireDb();
   await db.insert(reminders).values(input);
+  clearBuildingSnapshotCache(input.buildingId);
 }
 async function markReminderComplete(reminderId, buildingId) {
   const db = await requireDb();
   await db.update(reminders).set({ status: "complete" }).where(and(eq(reminders.id, reminderId), eq(reminders.buildingId, buildingId)));
+  clearBuildingSnapshotCache(buildingId);
 }
 async function getBuildingSnapshot(buildingId) {
-  const db = await requireDb();
-  const [floorRows, roomRows, tenantRows, tenantServiceRows, allocationRows, rentRows, electricityRows, expenseRows, operatingCostRows, serviceChargeRows, reminderRows, notificationRows, tenantChargeRows, transferRows] = await Promise.all([
-    db.select().from(floors).where(eq(floors.buildingId, buildingId)),
-    db.select().from(rooms).where(eq(rooms.buildingId, buildingId)),
-    db.select().from(tenants).where(eq(tenants.buildingId, buildingId)),
-    db.select().from(tenantServices).where(eq(tenantServices.buildingId, buildingId)).orderBy(tenantServices.tenantId),
-    db.select().from(roomAllocations).where(eq(roomAllocations.buildingId, buildingId)),
-    db.select().from(rentPayments).where(eq(rentPayments.buildingId, buildingId)).orderBy(desc(rentPayments.dueDate)),
-    db.select().from(electricityBills).where(eq(electricityBills.buildingId, buildingId)).orderBy(desc(electricityBills.billingMonth)),
-    db.select().from(expenses).where(eq(expenses.buildingId, buildingId)).orderBy(desc(expenses.expenseDate)),
-    db.select().from(operatingCosts).where(eq(operatingCosts.buildingId, buildingId)).orderBy(desc(operatingCosts.costDate)),
-    db.select().from(serviceCharges).where(eq(serviceCharges.buildingId, buildingId)).orderBy(serviceCharges.name),
-    db.select().from(reminders).where(eq(reminders.buildingId, buildingId)).orderBy(reminders.dueDate),
-    db.select().from(managerNotifications).where(eq(managerNotifications.buildingId, buildingId)).orderBy(desc(managerNotifications.createdAt)).limit(40),
-    db.select().from(tenantCharges).where(eq(tenantCharges.buildingId, buildingId)).orderBy(desc(tenantCharges.createdAt)),
-    db.select().from(tenantTransfers).where(eq(tenantTransfers.buildingId, buildingId)).orderBy(desc(tenantTransfers.effectiveDate))
-  ]);
-  return { floors: floorRows, rooms: roomRows, tenants: tenantRows, tenantServices: tenantServiceRows, allocations: allocationRows, rents: rentRows, electricity: electricityRows, expenses: expenseRows, operatingCosts: operatingCostRows, serviceCharges: serviceChargeRows, reminders: reminderRows, managerNotifications: notificationRows, tenantCharges: tenantChargeRows, tenantTransfers: transferRows };
+  const cached = snapshotCache.get(buildingId);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+  const existing = inFlightSnapshots.get(buildingId);
+  if (existing) return existing;
+  const promise = (async () => {
+    const db = await requireDb();
+    const [floorRows, roomRows, tenantRows, tenantServiceRows, allocationRows, rentRows, electricityRows, expenseRows, operatingCostRows, serviceChargeRows, reminderRows, notificationRows, tenantChargeRows, transferRows] = await Promise.all([
+      db.select().from(floors).where(eq(floors.buildingId, buildingId)),
+      db.select().from(rooms).where(eq(rooms.buildingId, buildingId)),
+      db.select().from(tenants).where(eq(tenants.buildingId, buildingId)),
+      db.select().from(tenantServices).where(eq(tenantServices.buildingId, buildingId)).orderBy(tenantServices.tenantId),
+      db.select().from(roomAllocations).where(eq(roomAllocations.buildingId, buildingId)),
+      db.select().from(rentPayments).where(eq(rentPayments.buildingId, buildingId)).orderBy(desc(rentPayments.dueDate)),
+      db.select().from(electricityBills).where(eq(electricityBills.buildingId, buildingId)).orderBy(desc(electricityBills.billingMonth)),
+      db.select().from(expenses).where(eq(expenses.buildingId, buildingId)).orderBy(desc(expenses.expenseDate)),
+      db.select().from(operatingCosts).where(eq(operatingCosts.buildingId, buildingId)).orderBy(desc(operatingCosts.costDate)),
+      db.select().from(serviceCharges).where(eq(serviceCharges.buildingId, buildingId)).orderBy(serviceCharges.name),
+      db.select().from(reminders).where(eq(reminders.buildingId, buildingId)).orderBy(reminders.dueDate),
+      db.select().from(managerNotifications).where(eq(managerNotifications.buildingId, buildingId)).orderBy(desc(managerNotifications.createdAt)).limit(40),
+      db.select().from(tenantCharges).where(eq(tenantCharges.buildingId, buildingId)).orderBy(desc(tenantCharges.createdAt)),
+      db.select().from(tenantTransfers).where(eq(tenantTransfers.buildingId, buildingId)).orderBy(desc(tenantTransfers.effectiveDate))
+    ]);
+    const data = { floors: floorRows, rooms: roomRows, tenants: tenantRows, tenantServices: tenantServiceRows, allocations: allocationRows, rents: rentRows, electricity: electricityRows, expenses: expenseRows, operatingCosts: operatingCostRows, serviceCharges: serviceChargeRows, reminders: reminderRows, managerNotifications: notificationRows, tenantCharges: tenantChargeRows, tenantTransfers: transferRows };
+    snapshotCache.set(buildingId, { data, expiresAt: Date.now() + 2500 });
+    return data;
+  })().finally(() => {
+    inFlightSnapshots.delete(buildingId);
+  });
+  inFlightSnapshots.set(buildingId, promise);
+  return promise;
 }
 async function getReceiptReviewHistory(input) {
   const db = await requireDb();
@@ -4017,29 +4111,42 @@ async function createTenantSupportRequest(input) {
 }
 async function submitTenantPaymentReceipt(input) {
   const db = await requireDb();
-  const tenant = (await db.select({ id: tenants.id, buildingId: tenants.buildingId }).from(tenants).where(eq(tenants.userId, input.userId)).limit(1))[0];
+  const tenant = (await db.select({ id: tenants.id, buildingId: tenants.buildingId, fullName: tenants.fullName }).from(tenants).where(eq(tenants.userId, input.userId)).limit(1))[0];
   if (!tenant) throw new Error("Tenant profile is not linked to this login.");
+  let label = "";
   if (input.type === "rent") {
     const payment = (await db.select({ id: rentPayments.id, rentMonth: rentPayments.rentMonth, dueDate: rentPayments.dueDate, status: rentPayments.status }).from(rentPayments).where(and(eq(rentPayments.id, input.billId), eq(rentPayments.tenantId, tenant.id), eq(rentPayments.buildingId, tenant.buildingId))).limit(1))[0];
     if (!payment) throw new Error("Rent record not found for this tenant.");
     await db.update(rentPayments).set({ receiptUrl: input.receiptUrl, paymentMethod: input.paymentMethod, receiptReviewStatus: "pending", receiptReviewedAt: null, receiptReviewedBy: null, receiptReviewNote: null }).where(eq(rentPayments.id, payment.id));
     await syncRentPaymentReminder({ id: payment.id, buildingId: tenant.buildingId, tenantId: tenant.id, rentMonth: payment.rentMonth, dueDate: payment.dueDate, status: payment.status, createdBy: input.userId });
-    return { success: true, label: `Rent ${payment.rentMonth}` };
-  }
-  if (input.type === "tenant_charge") {
+    label = `Rent ${payment.rentMonth}`;
+  } else if (input.type === "tenant_charge") {
     const charge = (await db.select({ id: tenantCharges.id, title: tenantCharges.title }).from(tenantCharges).where(and(eq(tenantCharges.id, input.billId), eq(tenantCharges.tenantId, tenant.id), eq(tenantCharges.buildingId, tenant.buildingId))).limit(1))[0];
     if (!charge) throw new Error("Tenant charge not found for this account.");
     await db.update(tenantCharges).set({ receiptUrl: input.receiptUrl, paymentMethod: input.paymentMethod, receiptReviewStatus: "pending", receiptReviewedAt: null, receiptReviewedBy: null, receiptReviewNote: null }).where(eq(tenantCharges.id, charge.id));
     await db.insert(reminders).values({ buildingId: tenant.buildingId, tenantId: tenant.id, rentPaymentId: null, title: `Tenant payment receipt submitted \xB7 ${charge.title}`, dueDate: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), createdBy: input.userId });
-    return { success: true, label: charge.title };
+    label = charge.title;
+  } else {
+    const allocation = (await db.select({ roomId: roomAllocations.roomId }).from(roomAllocations).where(and(eq(roomAllocations.tenantId, tenant.id), eq(roomAllocations.status, "active"))).limit(1))[0];
+    if (!allocation) throw new Error("An active room allocation is required to submit an electricity receipt.");
+    const bill = (await db.select({ id: electricityBills.id, billingMonth: electricityBills.billingMonth }).from(electricityBills).where(and(eq(electricityBills.id, input.billId), eq(electricityBills.roomId, allocation.roomId), eq(electricityBills.buildingId, tenant.buildingId))).limit(1))[0];
+    if (!bill) throw new Error("Electricity record not found for this tenant.");
+    await db.update(electricityBills).set({ receiptUrl: input.receiptUrl, paymentMethod: input.paymentMethod, receiptReviewStatus: "pending", receiptReviewedAt: null, receiptReviewedBy: null, receiptReviewNote: null }).where(eq(electricityBills.id, bill.id));
+    await db.insert(reminders).values({ buildingId: tenant.buildingId, tenantId: tenant.id, rentPaymentId: null, title: `Tenant payment receipt submitted \xB7 Electricity ${bill.billingMonth}`, dueDate: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), createdBy: input.userId });
+    label = `Electricity ${bill.billingMonth}`;
   }
-  const allocation = (await db.select({ roomId: roomAllocations.roomId }).from(roomAllocations).where(and(eq(roomAllocations.tenantId, tenant.id), eq(roomAllocations.status, "active"))).limit(1))[0];
-  if (!allocation) throw new Error("An active room allocation is required to submit an electricity receipt.");
-  const bill = (await db.select({ id: electricityBills.id, billingMonth: electricityBills.billingMonth }).from(electricityBills).where(and(eq(electricityBills.id, input.billId), eq(electricityBills.roomId, allocation.roomId), eq(electricityBills.buildingId, tenant.buildingId))).limit(1))[0];
-  if (!bill) throw new Error("Electricity record not found for this tenant.");
-  await db.update(electricityBills).set({ receiptUrl: input.receiptUrl, paymentMethod: input.paymentMethod, receiptReviewStatus: "pending", receiptReviewedAt: null, receiptReviewedBy: null, receiptReviewNote: null }).where(eq(electricityBills.id, bill.id));
-  await db.insert(reminders).values({ buildingId: tenant.buildingId, tenantId: tenant.id, rentPaymentId: null, title: `Tenant payment receipt submitted \xB7 Electricity ${bill.billingMonth}`, dueDate: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), createdBy: input.userId });
-  return { success: true, label: `Electricity ${bill.billingMonth}` };
+  await db.insert(managerNotifications).values({
+    buildingId: tenant.buildingId,
+    kind: "rent_cycle",
+    referenceKey: `receipt-${input.type}-${input.billId}-${Date.now()}`,
+    title: `Payment proof: ${label}`,
+    body: `${tenant.fullName} submitted payment receipt for ${label} via ${input.paymentMethod.toUpperCase()}`,
+    dueDate: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
+    status: "unread"
+  }).catch(() => {
+  });
+  clearBuildingSnapshotCache(tenant.buildingId);
+  return { success: true, label };
 }
 async function reviewTenantPaymentReceipt(input) {
   const db = await requireDb();
@@ -4049,13 +4156,14 @@ async function reviewTenantPaymentReceipt(input) {
   else if (input.type === "electricity") result = await db.update(electricityBills).set(set).where(and(eq(electricityBills.id, input.billId), eq(electricityBills.buildingId, input.buildingId), eq(electricityBills.updatedAt, input.expectedUpdatedAt))).returning({ id: electricityBills.id });
   else result = await db.update(tenantCharges).set(set).where(and(eq(tenantCharges.id, input.billId), eq(tenantCharges.buildingId, input.buildingId), eq(tenantCharges.updatedAt, input.expectedUpdatedAt))).returning({ id: tenantCharges.id });
   if (result.length !== 1) throw new Error("This receipt changed on another device or is outside the selected building. Review the latest record before deciding.");
+  clearBuildingSnapshotCache(input.buildingId);
   return { status: input.status };
 }
 async function addStaffAssignment(input) {
   const db = await requireDb();
   await db.insert(staffAssignments).values(input).onConflictDoUpdate({ target: [staffAssignments.buildingId, staffAssignments.userId], set: { userId: input.userId } });
 }
-var cachedDb, cachedPostgresPool, embeddedInitPromise, usingEmbeddedFallback, cachedPasswordHashes, forceInMemoryEmbedded, dbConnectPromise, DELETE_UNDO_WINDOW_MS;
+var cachedDb, cachedPostgresPool, embeddedInitPromise, usingEmbeddedFallback, cachedPasswordHashes, forceInMemoryEmbedded, dbConnectPromise, inFlightSnapshots, snapshotCache, userCacheById, userCacheByPhone, DELETE_UNDO_WINDOW_MS;
 var init_db = __esm({
   "server/db.ts"() {
     "use strict";
@@ -4071,6 +4179,10 @@ var init_db = __esm({
     cachedPasswordHashes = /* @__PURE__ */ new Map();
     forceInMemoryEmbedded = false;
     dbConnectPromise = null;
+    inFlightSnapshots = /* @__PURE__ */ new Map();
+    snapshotCache = /* @__PURE__ */ new Map();
+    userCacheById = /* @__PURE__ */ new Map();
+    userCacheByPhone = /* @__PURE__ */ new Map();
     DELETE_UNDO_WINDOW_MS = 10 * 60 * 1e3;
   }
 });
@@ -4535,6 +4647,7 @@ var delegateAdminProcedure = t.procedure.use(
 );
 
 // server/_core/systemRouter.ts
+init_db();
 var systemRouter = router({
   health: publicProcedure.input(
     z.object({
@@ -4543,6 +4656,27 @@ var systemRouter = router({
   ).query(() => ({
     ok: true
   })),
+  dbHealth: publicProcedure.query(async () => {
+    const t0 = Date.now();
+    let connected = false;
+    let mode = "embedded";
+    try {
+      const db = await getDb();
+      if (db) {
+        connected = true;
+        mode = isUsingEmbeddedFallback() ? "embedded" : "postgres";
+      }
+    } catch {
+      connected = false;
+    }
+    const latencyMs = Date.now() - t0;
+    return {
+      connected,
+      mode,
+      latencyMs,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }),
   notifyOwner: adminProcedure.input(
     z.object({
       title: z.string().min(1, "title is required"),
@@ -5396,7 +5530,7 @@ var pgRouter = router({
       const allocation = (await db.select().from(roomAllocations).where(and2(eq3(roomAllocations.id, input.allocationId), eq3(roomAllocations.buildingId, input.buildingId), eq3(roomAllocations.tenantId, input.tenantId), eq3(roomAllocations.status, "active"))).limit(1))[0];
       if (!allocation) throw new TRPCError4({ code: "BAD_REQUEST", message: "Choose an active allocation from the selected building." });
       const expectedAmountPaise = input.expectedAmountPaise > 0 ? input.expectedAmountPaise : allocation.monthlyRentPaise;
-      const status = deriveRentStatus2(expectedAmountPaise, input.paidAmountPaise);
+      const status = deriveRentStatus(expectedAmountPaise, input.paidAmountPaise);
       await recordRentPayment({ ...input, expectedAmountPaise, status, paidOn: status === "pending" ? null : input.paidOn ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), paymentMethod: status === "pending" ? null : input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, recordedBy: ctx.user.id });
       return { status, ownerAlertSent: false };
     }),
@@ -5406,7 +5540,7 @@ var pgRouter = router({
     }),
     update: protectedProcedure.input(z2.object({ id: z2.number().int().positive(), buildingId: z2.number().int().positive(), expectedUpdatedAt: z2.date(), dueDate: dateString, expectedAmountPaise: z2.number().int().positive(), paidAmountPaise: z2.number().int().min(0), paidOn: optionalDateString, paymentMethod: z2.enum(["cash", "upi", "bank_transfer"]).optional(), notes: z2.string().trim().max(800).optional(), receiptUrl: optionalStoredImageUrl })).mutation(async ({ ctx, input }) => {
       await requireBuildingAccess(ctx.user, input.buildingId, "manageRent");
-      const status = deriveRentStatus2(input.expectedAmountPaise, input.paidAmountPaise);
+      const status = deriveRentStatus(input.expectedAmountPaise, input.paidAmountPaise);
       try {
         await updateRentPayment({ ...input, status, paidOn: status === "pending" ? null : input.paidOn ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), paymentMethod: status === "pending" ? null : input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, recordedBy: ctx.user.id });
       } catch (error) {
@@ -5448,14 +5582,14 @@ var pgRouter = router({
       const building = await requireBuildingAccess(ctx.user, input.buildingId, "manageElectricity");
       const calculation = calculateElectricityBill(input.previousReading, input.currentReading, building.electricityRatePaise);
       const paidAmountPaise = input.paidAmountPaise ?? 0;
-      const status = deriveRentStatus2(calculation.billAmountPaise, paidAmountPaise);
+      const status = deriveRentStatus(calculation.billAmountPaise, paidAmountPaise);
       await recordElectricityBill({ ...input, ...calculation, paidAmountPaise, status, paidOn: status === "pending" ? null : input.paidOn ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), paymentMethod: status === "pending" ? null : input.paymentMethod ?? null, ratePerUnitPaise: building.electricityRatePaise, dueDate: input.dueDate ?? null, notes: input.notes || null, meterImageUrl: input.meterImageUrl || null, receiptUrl: input.receiptUrl || null, recordedBy: ctx.user.id });
       return { ...calculation, status };
     }),
     update: protectedProcedure.input(z2.object({ id: z2.number().int().positive(), buildingId: z2.number().int().positive(), expectedUpdatedAt: z2.date(), previousReading: z2.number().int().min(0), currentReading: z2.number().int().min(0), paidAmountPaise: z2.number().int().min(0), paidOn: optionalDateString, paymentMethod: z2.enum(["cash", "upi", "bank_transfer"]).optional(), meterImageUrl: optionalStoredImageUrl, receiptUrl: optionalStoredImageUrl, dueDate: optionalDateString, notes: z2.string().trim().max(800).optional() })).mutation(async ({ ctx, input }) => {
       const building = await requireBuildingAccess(ctx.user, input.buildingId, "manageElectricity");
       const calculation = calculateElectricityBill(input.previousReading, input.currentReading, building.electricityRatePaise);
-      const status = deriveRentStatus2(calculation.billAmountPaise, input.paidAmountPaise);
+      const status = deriveRentStatus(calculation.billAmountPaise, input.paidAmountPaise);
       try {
         await updateElectricityBill({ ...input, ...calculation, status, paidOn: status === "pending" ? null : input.paidOn ?? (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), paymentMethod: status === "pending" ? null : input.paymentMethod ?? null, ratePerUnitPaise: building.electricityRatePaise, dueDate: input.dueDate ?? null, notes: input.notes || null, meterImageUrl: input.meterImageUrl || null, receiptUrl: input.receiptUrl || null, recordedBy: ctx.user.id });
       } catch (error) {

@@ -661,9 +661,28 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
 
       const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
       if (!check.rows[0]?.reg) {
-        const rawSql = typeof __EMBEDDED_SCHEMA_SQL__ === "string" && __EMBEDDED_SCHEMA_SQL__.length > 0
-          ? __EMBEDDED_SCHEMA_SQL__
-          : fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
+        let rawSql: string | undefined;
+        if (typeof __EMBEDDED_SCHEMA_SQL__ === "string" && __EMBEDDED_SCHEMA_SQL__.length > 0) {
+          rawSql = __EMBEDDED_SCHEMA_SQL__;
+        } else {
+          const candidates = [
+            path.resolve(process.cwd(), "supabase", "schema.sql"),
+            path.resolve(process.cwd(), "..", "supabase", "schema.sql"),
+            path.resolve(import.meta.dirname, "..", "supabase", "schema.sql"),
+            path.resolve(import.meta.dirname, "supabase", "schema.sql"),
+          ];
+          for (const cand of candidates) {
+            try {
+              if (fs.existsSync(cand)) {
+                rawSql = fs.readFileSync(cand, "utf8");
+                break;
+              }
+            } catch {}
+          }
+          if (!rawSql) {
+            rawSql = fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
+          }
+        }
         const rawSchema = rawSql
           .replace(/--> statement-breakpoint/g, "\n")
           .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
@@ -752,7 +771,7 @@ export async function getDb(): Promise<DatabaseConnection | null> {
       const pool = new Pool({
         connectionString,
         max,
-        connectionTimeoutMillis: 1_500,
+        connectionTimeoutMillis: 5_000,
         idleTimeoutMillis: 30_000,
         allowExitOnIdle: true,
         ssl: { rejectUnauthorized: false },
@@ -906,8 +925,11 @@ export async function ensureMonthlyRentCycles(input: { rentMonth: string; buildi
     const existing = existingTenantMonth.filter(payment => payment.allocationId === allocation.allocationId);
     if (existing.length === 0 && existingTenantMonth.length > 0) continue;
     await db.insert(rentPayments).values({ buildingId: allocation.buildingId, allocationId: allocation.allocationId, tenantId: allocation.tenantId, rentMonth: input.rentMonth, dueDate, expectedAmountPaise: allocation.monthlyRentPaise, paidAmountPaise: 0, status: "pending", paidOn: null, notes: "Auto-generated monthly rent cycle", receiptUrl: null, recordedBy: input.createdBy ?? null }).onConflictDoUpdate({ target: [rentPayments.allocationId, rentPayments.rentMonth], set: { rentMonth: input.rentMonth } });
-    const payment = (await db.select({ id: rentPayments.id, status: rentPayments.status }).from(rentPayments).where(and(eq(rentPayments.allocationId, allocation.allocationId), eq(rentPayments.rentMonth, input.rentMonth))).limit(1))[0];
+    const payment = (await db.select({ id: rentPayments.id, status: rentPayments.status, paidAmountPaise: rentPayments.paidAmountPaise }).from(rentPayments).where(and(eq(rentPayments.allocationId, allocation.allocationId), eq(rentPayments.rentMonth, input.rentMonth))).limit(1))[0];
     if (!payment) throw new Error("Automatic rent cycle could not be created.");
+    if (payment.status === "pending" && payment.paidAmountPaise === 0) {
+      await db.update(rentPayments).set({ expectedAmountPaise: allocation.monthlyRentPaise, dueDate }).where(eq(rentPayments.id, payment.id));
+    }
     await syncRentPaymentReminder({ id: payment.id, buildingId: allocation.buildingId, tenantId: allocation.tenantId, rentMonth: input.rentMonth, dueDate, status: payment.status, createdBy: input.createdBy ?? null });
     if (!existing[0]) {
       created += 1;

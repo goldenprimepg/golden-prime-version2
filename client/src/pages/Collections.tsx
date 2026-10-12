@@ -687,9 +687,9 @@ export default function Collections() {
             expectedUpdatedAt: card.roomElectricityBill.updatedAt,
             previousReading: prevReading,
             currentReading: currReading,
-            paidAmountPaise: elecPaidPaise,
-            paidOn: elecPaidPaise > 0 ? todayIso() : undefined,
-            paymentMethod: draft.paymentMethod,
+            paidAmountPaise: card.roomElectricityBill.paidAmountPaise,
+            paidOn: card.roomElectricityBill.paidOn ?? undefined,
+            paymentMethod: card.roomElectricityBill.paymentMethod ?? undefined,
             dueDate: draft.dueDate,
           });
         } else {
@@ -699,10 +699,28 @@ export default function Collections() {
             billingMonth: month,
             previousReading: prevReading,
             currentReading: currReading,
-            paidAmountPaise: elecPaidPaise,
-            paidOn: elecPaidPaise > 0 ? todayIso() : undefined,
-            paymentMethod: draft.paymentMethod,
             dueDate: draft.dueDate,
+          });
+        }
+      }
+
+      // Update tenant electricity charge if present
+      if (card.tenantElectricityCharge) {
+        const tenantExpectedPaise = card.tenantElectricityCharge.expectedAmountPaise;
+        const tenantPaidPaise =
+          draft.elecStatus === "paid"
+            ? tenantExpectedPaise
+            : draft.elecStatus === "pending"
+              ? 0
+              : Math.min(tenantExpectedPaise, Math.max(0, Math.round(Number(draft.elecPaidRupees || 0) * 100)));
+        if (tenantPaidPaise !== card.tenantElectricityCharge.paidAmountPaise || draft.elecStatus !== card.tenantElectricityCharge.status) {
+          await updateCharge.mutateAsync({
+            id: card.tenantElectricityCharge.id,
+            buildingId,
+            expectedUpdatedAt: card.tenantElectricityCharge.updatedAt,
+            paidAmountPaise: tenantPaidPaise,
+            paidOn: tenantPaidPaise > 0 ? todayIso() : undefined,
+            paymentMethod: draft.paymentMethod,
           });
         }
       }
@@ -757,8 +775,6 @@ export default function Collections() {
       if (hasCurrReading) {
         const prevReading = Math.max(0, Math.round(Number(draft.prevReading || 0)));
         const currReading = Math.max(0, Math.round(Number(draft.currReading || 0)));
-        const units = Math.max(0, currReading - prevReading);
-        const billAmountPaise = units * building.electricityRatePaise;
         if (card.roomElectricityBill) {
           await updateElectricity.mutateAsync({
             id: card.roomElectricityBill.id,
@@ -766,9 +782,9 @@ export default function Collections() {
             expectedUpdatedAt: card.roomElectricityBill.updatedAt,
             previousReading: prevReading,
             currentReading: currReading,
-            paidAmountPaise: billAmountPaise,
-            paidOn: todayIso(),
-            paymentMethod: draft.paymentMethod || "upi",
+            paidAmountPaise: card.roomElectricityBill.paidAmountPaise,
+            paidOn: card.roomElectricityBill.paidOn ?? undefined,
+            paymentMethod: card.roomElectricityBill.paymentMethod ?? undefined,
             dueDate: draft.dueDate,
           });
         } else {
@@ -778,13 +794,21 @@ export default function Collections() {
             billingMonth: month,
             previousReading: prevReading,
             currentReading: currReading,
-            paidAmountPaise: billAmountPaise,
-            paidOn: todayIso(),
-            paymentMethod: draft.paymentMethod || "upi",
             dueDate: draft.dueDate,
           });
         }
-      } else if (card.roomElectricityBill && card.roomElectricityBill.status !== "paid") {
+      }
+
+      if (card.tenantElectricityCharge && card.tenantElectricityCharge.status !== "paid") {
+        await updateCharge.mutateAsync({
+          id: card.tenantElectricityCharge.id,
+          buildingId,
+          expectedUpdatedAt: card.tenantElectricityCharge.updatedAt,
+          paidAmountPaise: card.tenantElectricityCharge.expectedAmountPaise,
+          paidOn: todayIso(),
+          paymentMethod: draft.paymentMethod || "upi",
+        });
+      } else if (card.roomElectricityBill && card.roomOccupantCount <= 1 && card.roomElectricityBill.status !== "paid") {
         await updateElectricity.mutateAsync({
           id: card.roomElectricityBill.id,
           buildingId,
@@ -795,6 +819,17 @@ export default function Collections() {
           paidOn: todayIso(),
           paymentMethod: draft.paymentMethod || "upi",
           dueDate: card.roomElectricityBill.dueDate ?? undefined,
+        });
+      }
+
+      for (const charge of card.otherCharges.filter(c => c.status !== "paid")) {
+        await updateCharge.mutateAsync({
+          id: charge.id,
+          buildingId,
+          expectedUpdatedAt: charge.updatedAt,
+          paidAmountPaise: charge.expectedAmountPaise,
+          paidOn: todayIso(),
+          paymentMethod: draft.paymentMethod || "upi",
         });
       }
 
@@ -1105,7 +1140,7 @@ export default function Collections() {
             </span>
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Rate: {formatCurrency(building.electricityRatePaise)} / unit
+            Rate: {formatCurrency(building?.electricityRatePaise ?? 0)} / unit
           </p>
         </div>
         <div className="rounded-2xl border border-border/70 bg-card p-4 shadow-sm">

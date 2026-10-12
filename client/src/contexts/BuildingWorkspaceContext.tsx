@@ -70,10 +70,16 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   const liveWorkspaceSnapshot = trpc.pg.operations.snapshot.useQuery({ buildingId: buildingId ?? 0 }, { enabled: Boolean(buildingId) && isOnline, ...liveQueryOptions });
   const snapshotData = liveWorkspaceSnapshot.data ?? (offlineSnapshot?.data as WorkspaceSnapshotData | undefined);
   const isRefreshing = !snapshotData && (liveBuildingsQuery.isFetching || liveWorkspaceSnapshot.isFetching);
-  const snapshotQuery: WorkspaceSnapshotQuery = useMemo(() => ({
-    data: snapshotData as WorkspaceSnapshotData,
-    isLoading: !snapshotData && ((isOnline && liveWorkspaceSnapshot.isLoading) || !offlineSnapshot?.data),
-  }) as WorkspaceSnapshotQuery, [isOnline, liveWorkspaceSnapshot.isLoading, offlineSnapshot?.data, snapshotData]);
+  const snapshotQuery: WorkspaceSnapshotQuery = useMemo(() => {
+    const isActivelyLoading = !snapshotData && (
+      buildingsQuery.isLoading ||
+      (Boolean(buildingId) && isOnline && liveWorkspaceSnapshot.isLoading)
+    );
+    return {
+      data: snapshotData as WorkspaceSnapshotData,
+      isLoading: isActivelyLoading,
+    };
+  }, [buildingId, buildingsQuery.isLoading, isOnline, liveWorkspaceSnapshot.isLoading, snapshotData]);
 
   const invalidateWorkspace = async (targetId?: number) => {
     const id = targetId ?? buildingId;
