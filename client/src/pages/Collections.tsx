@@ -27,6 +27,7 @@ import { formatCurrency } from "@/lib/format";
 import { trpc } from "@/lib/trpc";
 import { useActiveBuilding } from "@/hooks/useActiveBuilding";
 import { buildReminderShareMessage, buildWhatsAppShareUrl } from "@shared/sharing";
+import { RoomBillingMasterModule } from "@/components/RoomBillingMasterModule";
 
 const fieldClass =
   "h-11 w-full rounded-xl border border-border bg-background px-3 text-sm outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10";
@@ -1163,6 +1164,18 @@ export default function Collections() {
           </p>
         </div>
       </section>
+
+      {/* Room-Wise Monthly Billing & Collection Master Module */}
+      {buildingId && snapshot.data && (
+        <div className="mb-6">
+          <RoomBillingMasterModule
+            buildingId={buildingId}
+            billingMonth={month}
+            snapshotData={snapshot.data}
+            onInvalidate={refresh}
+          />
+        </div>
+      )}
 
       {/* Single-Tab New Tenant + Vacant Room Allocation + Room Type + Services Panel */}
       {showOnboardPanel ? (
