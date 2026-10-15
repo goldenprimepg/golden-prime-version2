@@ -101,6 +101,9 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     tenantServices: [],
     staffAssignments: [],
     changeAuditLogs: [],
+    tenantTransfers: [],
+    rents: [],
+    electricity: [],
   }), [building, buildingId]);
 
   const snapshotData = liveWorkspaceSnapshot.data ?? (offlineSnapshot?.data as WorkspaceSnapshotData | undefined);
@@ -111,8 +114,21 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
       buildingsQuery.isLoading ||
       (Boolean(buildingId) && isOnline && liveWorkspaceSnapshot.isLoading)
     );
+    const rawData = resolvedSnapshotData ?? emptyFallbackSnapshot;
+    const safeData = rawData ? new Proxy(rawData, {
+      get(target, prop) {
+        const val = (target as any)[prop];
+        if (val === undefined || val === null) {
+          if (typeof prop === 'string' && ['floors', 'rooms', 'tenants', 'allocations', 'tenantCharges', 'rentPayments', 'electricityBills', 'expenses', 'operatingCosts', 'reminders', 'governmentElectricityPayments', 'ownerSettlements', 'serviceCharges', 'tenantServices', 'staffAssignments', 'changeAuditLogs', 'tenantTransfers', 'rents', 'electricity'].includes(prop)) {
+            return [];
+          }
+        }
+        return val;
+      }
+    }) : emptyFallbackSnapshot;
+
     return {
-      data: (resolvedSnapshotData ?? emptyFallbackSnapshot) as WorkspaceSnapshotData,
+      data: safeData as WorkspaceSnapshotData,
       isLoading: isActivelyLoading,
       isError: liveWorkspaceSnapshot.isError || snapshotTimedOut,
       error: liveWorkspaceSnapshot.error,
