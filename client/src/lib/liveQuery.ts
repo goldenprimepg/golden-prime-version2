@@ -1,7 +1,8 @@
 export const liveQueryOptions = {
-  staleTime: 30_000,
+  staleTime: 60_000,
+  gcTime: 15 * 60_000,
   refetchOnMount: false,
-  refetchInterval: 15_000,
+  refetchInterval: false,
   refetchIntervalInBackground: false,
-  refetchOnWindowFocus: true,
+  refetchOnWindowFocus: false,
 } as const;

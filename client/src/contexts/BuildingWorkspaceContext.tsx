@@ -32,7 +32,7 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
   const { isReachable: isOnline } = useServerReachability();
   const utils = trpc.useUtils();
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(() => new Date());
-  const liveBuildingsQuery = trpc.pg.buildings.list.useQuery(undefined, { ...liveQueryOptions, enabled: isOnline });
+  const liveBuildingsQuery = trpc.pg.buildings.list.useQuery(undefined, { ...liveQueryOptions, enabled: isOnline, placeholderData: (prev: any) => prev });
   const [buildingId, setBuildingIdState] = useState<number | null>(() => {
     const stored = Number(window.localStorage.getItem(STORAGE_KEY));
     return Number.isSafeInteger(stored) && stored > 0 ? stored : null;
@@ -71,22 +71,54 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     window.localStorage.setItem(STORAGE_KEY, String(id));
   };
   const building = useMemo(() => buildingsQuery.data?.find(item => item.id === buildingId) ?? null, [buildingId, buildingsQuery.data]);
-  const liveWorkspaceSnapshot = trpc.pg.operations.snapshot.useQuery({ buildingId: buildingId ?? 0 }, { enabled: Boolean(buildingId) && isOnline, ...liveQueryOptions });
+  const liveWorkspaceSnapshot = trpc.pg.operations.snapshot.useQuery({ buildingId: buildingId ?? 0 }, { enabled: Boolean(buildingId) && isOnline, ...liveQueryOptions, placeholderData: (prev: any) => prev });
+  
+  const [snapshotTimedOut, setSnapshotTimedOut] = useState(false);
+  useEffect(() => {
+    setSnapshotTimedOut(false);
+    if (!buildingId) return;
+    const timer = setTimeout(() => {
+      setSnapshotTimedOut(true);
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [buildingId]);
+
+  const emptyFallbackSnapshot = useMemo(() => ({
+    building: building ?? { id: buildingId ?? 0, name: "Building", address: "", city: null, landmark: null, contactPhone: null, imageUrl: null, mapUrl: null, ownerCutPercent: 0, ownerMonthlyCutPaise: 0, paymentBankName: null, paymentAccountName: null, paymentAccountNumber: null, paymentIfsc: null, paymentUpiId: null, paymentQrUrl: null, electricityRatePaise: 0, rentDueDay: 5 },
+    floors: [],
+    rooms: [],
+    tenants: [],
+    allocations: [],
+    tenantCharges: [],
+    rentPayments: [],
+    electricityBills: [],
+    expenses: [],
+    operatingCosts: [],
+    reminders: [],
+    governmentElectricityPayments: [],
+    ownerSettlements: [],
+    serviceCharges: [],
+    tenantServices: [],
+    staffAssignments: [],
+    changeAuditLogs: [],
+  }), [building, buildingId]);
+
   const snapshotData = liveWorkspaceSnapshot.data ?? (offlineSnapshot?.data as WorkspaceSnapshotData | undefined);
-  const isRefreshing = !snapshotData && (liveBuildingsQuery.isFetching || liveWorkspaceSnapshot.isFetching);
+  const resolvedSnapshotData = snapshotData ?? (snapshotTimedOut ? emptyFallbackSnapshot : undefined);
+  const isRefreshing = !resolvedSnapshotData && (liveBuildingsQuery.isFetching || liveWorkspaceSnapshot.isFetching);
   const snapshotQuery: WorkspaceSnapshotQuery = useMemo(() => {
-    const isActivelyLoading = !snapshotData && !liveWorkspaceSnapshot.isError && (
+    const isActivelyLoading = !resolvedSnapshotData && !liveWorkspaceSnapshot.isError && !snapshotTimedOut && (
       buildingsQuery.isLoading ||
       (Boolean(buildingId) && isOnline && liveWorkspaceSnapshot.isLoading)
     );
     return {
-      data: snapshotData as WorkspaceSnapshotData,
+      data: (resolvedSnapshotData ?? emptyFallbackSnapshot) as WorkspaceSnapshotData,
       isLoading: isActivelyLoading,
-      isError: liveWorkspaceSnapshot.isError,
+      isError: liveWorkspaceSnapshot.isError || snapshotTimedOut,
       error: liveWorkspaceSnapshot.error,
-      refetch: () => void liveWorkspaceSnapshot.refetch(),
+      refetch: () => { setSnapshotTimedOut(false); void liveWorkspaceSnapshot.refetch(); },
     };
-  }, [buildingId, buildingsQuery.isLoading, isOnline, liveWorkspaceSnapshot.error, liveWorkspaceSnapshot.isError, liveWorkspaceSnapshot.isLoading, snapshotData]);
+  }, [buildingId, buildingsQuery.isLoading, isOnline, liveWorkspaceSnapshot, resolvedSnapshotData, snapshotTimedOut, emptyFallbackSnapshot]);
 
   const invalidateWorkspace = async (targetId?: number) => {
     const id = targetId ?? buildingId;
