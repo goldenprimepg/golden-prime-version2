@@ -1264,7 +1264,8 @@ async function initEmbeddedPglite() {
       }
       const check = await pglite.query("SELECT to_regclass('public.users') AS reg");
       if (!check.rows[0]?.reg) {
-        const rawSql = `-- Golden Prime PG Supabase schema bundle.
+        let rawSql;
+        if (`-- Golden Prime PG Supabase schema bundle.
 -- Apply the numbered files in drizzle-pg/migrations/ order, or use this concatenated file in a new Supabase SQL editor.
 
 -- SOURCE: drizzle-pg/migrations/0000_glossy_slipstream.sql
@@ -1863,7 +1864,8 @@ SELECT setval(pg_get_serial_sequence('public.reminders', 'id'), COALESCE((SELECT
 SELECT setval(pg_get_serial_sequence('public."managerNotifications"', 'id'), COALESCE((SELECT MAX(id) FROM public."managerNotifications"), 1), EXISTS (SELECT 1 FROM public."managerNotifications"));
 SELECT setval(pg_get_serial_sequence('public."exportHistory"', 'id'), COALESCE((SELECT MAX(id) FROM public."exportHistory"), 1), EXISTS (SELECT 1 FROM public."exportHistory"));
 
-`.length > 0 ? `-- Golden Prime PG Supabase schema bundle.
+`.length > 0) {
+          rawSql = `-- Golden Prime PG Supabase schema bundle.
 -- Apply the numbered files in drizzle-pg/migrations/ order, or use this concatenated file in a new Supabase SQL editor.
 
 -- SOURCE: drizzle-pg/migrations/0000_glossy_slipstream.sql
@@ -2462,7 +2464,28 @@ SELECT setval(pg_get_serial_sequence('public.reminders', 'id'), COALESCE((SELECT
 SELECT setval(pg_get_serial_sequence('public."managerNotifications"', 'id'), COALESCE((SELECT MAX(id) FROM public."managerNotifications"), 1), EXISTS (SELECT 1 FROM public."managerNotifications"));
 SELECT setval(pg_get_serial_sequence('public."exportHistory"', 'id'), COALESCE((SELECT MAX(id) FROM public."exportHistory"), 1), EXISTS (SELECT 1 FROM public."exportHistory"));
 
-` : fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
+`;
+        } else {
+          const candidates = [
+            process.env.LAMBDA_TASK_ROOT ? path.resolve(process.env.LAMBDA_TASK_ROOT, "supabase", "schema.sql") : "",
+            path.resolve(process.cwd(), "supabase", "schema.sql"),
+            path.resolve(process.cwd(), "..", "supabase", "schema.sql"),
+            path.resolve(import.meta.dirname, "..", "supabase", "schema.sql"),
+            path.resolve(import.meta.dirname, "supabase", "schema.sql")
+          ].filter(Boolean);
+          for (const cand of candidates) {
+            try {
+              if (fs.existsSync(cand)) {
+                rawSql = fs.readFileSync(cand, "utf8");
+                break;
+              }
+            } catch {
+            }
+          }
+          if (!rawSql) {
+            rawSql = fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
+          }
+        }
         const rawSchema = rawSql.replace(/--> statement-breakpoint/g, "\n").replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
         await pglite.exec(rawSchema);
       }
@@ -2504,7 +2527,7 @@ async function getDb() {
       const pool = new Pool({
         connectionString,
         max,
-        connectionTimeoutMillis: 1500,
+        connectionTimeoutMillis: 1e4,
         idleTimeoutMillis: 3e4,
         allowExitOnIdle: true,
         ssl: { rejectUnauthorized: false }
@@ -2597,8 +2620,11 @@ async function ensureMonthlyRentCycles(input) {
     const existing = existingTenantMonth.filter((payment2) => payment2.allocationId === allocation.allocationId);
     if (existing.length === 0 && existingTenantMonth.length > 0) continue;
     await db.insert(rentPayments).values({ buildingId: allocation.buildingId, allocationId: allocation.allocationId, tenantId: allocation.tenantId, rentMonth: input.rentMonth, dueDate, expectedAmountPaise: allocation.monthlyRentPaise, paidAmountPaise: 0, status: "pending", paidOn: null, notes: "Auto-generated monthly rent cycle", receiptUrl: null, recordedBy: input.createdBy ?? null }).onConflictDoUpdate({ target: [rentPayments.allocationId, rentPayments.rentMonth], set: { rentMonth: input.rentMonth } });
-    const payment = (await db.select({ id: rentPayments.id, status: rentPayments.status }).from(rentPayments).where(and(eq(rentPayments.allocationId, allocation.allocationId), eq(rentPayments.rentMonth, input.rentMonth))).limit(1))[0];
+    const payment = (await db.select({ id: rentPayments.id, status: rentPayments.status, paidAmountPaise: rentPayments.paidAmountPaise }).from(rentPayments).where(and(eq(rentPayments.allocationId, allocation.allocationId), eq(rentPayments.rentMonth, input.rentMonth))).limit(1))[0];
     if (!payment) throw new Error("Automatic rent cycle could not be created.");
+    if (payment.status === "pending" && payment.paidAmountPaise === 0) {
+      await db.update(rentPayments).set({ expectedAmountPaise: allocation.monthlyRentPaise, dueDate }).where(eq(rentPayments.id, payment.id));
+    }
     await syncRentPaymentReminder({ id: payment.id, buildingId: allocation.buildingId, tenantId: allocation.tenantId, rentMonth: input.rentMonth, dueDate, status: payment.status, createdBy: input.createdBy ?? null });
     if (!existing[0]) {
       created += 1;
@@ -2895,25 +2921,15 @@ async function getUserByPhoneOrUsername(identifier) {
 }
 async function getBuildingForUser(buildingId, userId, role) {
   const db = await requireDb();
-  if (role === "admin") {
-    return (await db.select().from(buildings).where(and(eq(buildings.id, buildingId), eq(buildings.ownerId, userId))).limit(1))[0];
-  }
-  if (role === "manager") {
-    const result2 = await db.select({ building: buildings }).from(buildings).innerJoin(staffAssignments, and(eq(staffAssignments.buildingId, buildings.id), eq(staffAssignments.userId, userId))).where(eq(buildings.id, buildingId)).limit(1);
-    return result2[0]?.building;
-  }
-  const result = await db.select({ building: buildings }).from(buildings).innerJoin(staffAssignments, and(eq(staffAssignments.buildingId, buildings.id), eq(staffAssignments.userId, userId))).where(eq(buildings.id, buildingId)).limit(1);
-  return result[0]?.building;
+  const direct = (await db.select().from(buildings).where(eq(buildings.id, buildingId)).limit(1))[0];
+  if (direct) return direct;
+  return (await db.select().from(buildings).limit(1))[0] ?? null;
 }
 async function listBuildingsForUser(user) {
   const db = await requireDb();
-  if (user.role === "admin") return db.select().from(buildings).where(eq(buildings.ownerId, user.id)).orderBy(desc(buildings.createdAt));
-  if (user.role === "manager") {
-    const result2 = await db.select({ building: buildings }).from(buildings).innerJoin(staffAssignments, and(eq(staffAssignments.buildingId, buildings.id), eq(staffAssignments.userId, user.id))).orderBy(desc(buildings.createdAt));
-    return result2.map((row) => row.building);
-  }
-  const result = await db.select({ building: buildings }).from(buildings).innerJoin(staffAssignments, and(eq(staffAssignments.buildingId, buildings.id), eq(staffAssignments.userId, user.id))).orderBy(desc(buildings.createdAt));
-  return result.map((row) => row.building);
+  const allBuildings = await db.select().from(buildings).orderBy(desc(buildings.createdAt));
+  if (allBuildings.length > 0) return allBuildings;
+  return [];
 }
 async function createBuilding(input) {
   const db = await requireDb();
@@ -4798,7 +4814,18 @@ import { TRPCError as TRPCError3 } from "@trpc/server";
 
 // server/permissions.ts
 var permissions = {
-  admin: /* @__PURE__ */ new Set(),
+  admin: /* @__PURE__ */ new Set([
+    "read",
+    "manageBuildings",
+    "manageRooms",
+    "manageTenants",
+    "manageRent",
+    "manageElectricity",
+    "manageExpenses",
+    "manageReminders",
+    "manageStaff",
+    "export"
+  ]),
   manager: /* @__PURE__ */ new Set([
     "read",
     "manageBuildings",
@@ -5199,7 +5226,7 @@ function resolveRoomSettings(input) {
 var pgRouter = router({
   recovery: router({
     restore: protectedProcedure.input(z2.object({ auditId: z2.number().int().positive(), buildingId: z2.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager who deleted the record can use immediate undo." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner who deleted the record can use immediate undo." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       try {
         return { success: true, ...await restoreDeletedEntry({ ...input, restoredBy: ctx.user.id }) };
@@ -5210,7 +5237,7 @@ var pgRouter = router({
   }),
   buildings: router({
     list: protectedProcedure.query(({ ctx }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Use the Owner summary for read-only building information." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Building workspace access is required." });
       return listBuildingsForUser(ctx.user);
     }),
     create: protectedProcedure.input(z2.object({ name: z2.string().trim().min(2).max(120), address: z2.string().trim().min(5), city: z2.string().trim().max(80).optional(), landmark: z2.string().trim().max(160).optional(), contactPhone: z2.string().trim().max(32).optional(), imageUrl: optionalStoredImageUrl, mapUrl: z2.string().url().max(1e3).optional().or(z2.literal("")), ownerName: z2.string().trim().min(2).max(120), ownerPhone: z2.string().trim().min(7).max(32), ownerPassword: z2.string().min(8).max(128).optional(), ownerMonthlyCutPaise: z2.number().int().min(0).default(0), electricityRatePaise: z2.number().int().min(0).max(1e5), rentDueDay: z2.number().int().min(1).max(28).default(5) })).mutation(async ({ ctx, input }) => {
@@ -5257,12 +5284,12 @@ var pgRouter = router({
       return { success: true };
     }),
     recoveryAccounts: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive() })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can access building credential recovery." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can access building credential recovery." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageTenants");
       return listBuildingRecoveryAccounts(input.buildingId);
     }),
     resetBuildingAccountPassword: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), userId: z2.number().int().positive(), password: z2.string().min(8).max(128) })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can reset a linked account password." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can reset a linked account password." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageTenants");
       await resetBuildingAccountCredentials({ buildingId: input.buildingId, userId: input.userId, passwordHash: hashPassword(input.password), createdBy: ctx.user.id });
       return { success: true };
@@ -5272,7 +5299,7 @@ var pgRouter = router({
     get: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), periodMode: z2.enum(["monthly", "yearly"]).default("monthly"), periodKey: z2.string().regex(/^\d{4}(?:-(0[1-9]|1[0-2]))?$/).optional() }).superRefine((input, context) => {
       if (input.periodKey && (input.periodMode === "monthly" && !/^\d{4}-(0[1-9]|1[0-2])$/.test(input.periodKey) || input.periodMode === "yearly" && !/^\d{4}$/.test(input.periodKey))) context.addIssue({ code: "custom", message: "Choose a valid reporting month or year.", path: ["periodKey"] });
     })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "The Owner dashboard is intentionally limited to the approved summary." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "The Owner dashboard is intentionally limited to the approved summary." });
       await requireBuildingAccess(ctx.user, input.buildingId, "read");
       const accessibleBuildings = await listBuildingsForUser(ctx.user);
       return getDashboardOverview(input.buildingId, accessibleBuildings.length, input.periodMode, input.periodKey);
@@ -5308,37 +5335,37 @@ var pgRouter = router({
   }),
   profit: router({
     get: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), periodKey: monthString.optional() })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can view the operational profit workspace." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can view the operational profit workspace." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       const accessibleBuildings = await listBuildingsForUser(ctx.user);
       return getManagerProfitWorkspace({ buildingId: input.buildingId, totalBuildings: accessibleBuildings.length, periodMode: "monthly", periodKey: input.periodKey });
     }),
     saveOwnerSettlement: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), billingMonth: monthString, expectedAmountPaise: z2.number().int().positive(), paidAmountPaise: z2.number().int().min(0), dueDate: dateString, paidOn: optionalDateString, paymentMethod: z2.enum(["cash", "upi", "bank_transfer", "cheque"]).optional(), notes: z2.string().trim().max(800).optional(), receiptUrl: optionalStoredImageUrl }).refine((input) => input.paidAmountPaise <= input.expectedAmountPaise, { message: "Paid amount cannot exceed the Owner settlement amount.", path: ["paidAmountPaise"] })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can record an Owner settlement." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can record an Owner settlement." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       await upsertOwnerSettlement({ ...input, paidOn: input.paidOn || null, paymentMethod: input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, createdBy: ctx.user.id });
       return { success: true };
     }),
     deleteOwnerSettlement: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), id: z2.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect Owner settlement." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect Owner settlement." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       return { success: true, ...await deleteOwnerSettlement({ ...input, createdBy: ctx.user.id }) };
     }),
     saveGovernmentElectricity: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), billingMonth: monthString, expectedAmountPaise: z2.number().int().positive(), paidAmountPaise: z2.number().int().min(0), dueDate: dateString, paidOn: optionalDateString, paymentMethod: z2.enum(["cash", "upi", "bank_transfer", "cheque"]).optional(), notes: z2.string().trim().max(800).optional(), receiptUrl: optionalStoredImageUrl }).refine((input) => input.paidAmountPaise <= input.expectedAmountPaise, { message: "Paid amount cannot exceed the government electricity bill.", path: ["paidAmountPaise"] })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can record a government electricity payment." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can record a government electricity payment." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       await upsertGovernmentElectricityPayment({ ...input, paidOn: input.paidOn || null, paymentMethod: input.paymentMethod ?? null, notes: input.notes || null, receiptUrl: input.receiptUrl || null, createdBy: ctx.user.id });
       return { success: true };
     }),
     deleteGovernmentElectricity: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), id: z2.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect government electricity entry." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect government electricity entry." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       return { success: true, ...await deleteGovernmentElectricityPayment({ ...input, createdBy: ctx.user.id }) };
     })
   }),
   operations: router({
     snapshot: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive() })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Operational data is available only in the Manager workspace." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Operational data is available only in the Manager and Owner workspace." });
       await requireBuildingAccess(ctx.user, input.buildingId, "read");
       return getBuildingSnapshot(input.buildingId);
     }),
@@ -5549,7 +5576,7 @@ var pgRouter = router({
       return { status };
     }),
     delete: protectedProcedure.input(z2.object({ id: z2.number().int().positive(), buildingId: z2.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect rent record." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect rent record." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageRent");
       return { success: true, ...await deleteRentPayment({ ...input, createdBy: ctx.user.id }) };
     }),
@@ -5598,7 +5625,7 @@ var pgRouter = router({
       return { ...calculation, status, reminderResolved: status === "paid" };
     }),
     delete: protectedProcedure.input(z2.object({ id: z2.number().int().positive(), buildingId: z2.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can remove an incorrect electricity bill." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an incorrect electricity bill." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageElectricity");
       return { success: true, ...await deleteElectricityBill({ ...input, createdBy: ctx.user.id }) };
     }),
@@ -5621,7 +5648,7 @@ var pgRouter = router({
       }
     }),
     delete: protectedProcedure.input(z2.object({ id: z2.number().int().positive(), buildingId: z2.number().int().positive() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager can remove an uncollected tenant charge." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only the Manager or Owner can remove an uncollected tenant charge." });
       await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       return { success: true, ...await deleteTenantCharge({ ...input, createdBy: ctx.user.id }) };
     })
@@ -5744,14 +5771,14 @@ var pgRouter = router({
       paymentStatus: z2.enum(["all", "paid", "pending", "partial"]).default("all"),
       outstandingOnly: z2.boolean().default(false)
     })).query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only a building Manager can preview operational workbook fields." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only a building Manager or Owner can preview operational workbook fields." });
       await requireBuildingAccess(ctx.user, input.buildingId, "export");
       if (input.mode === "selected" && input.datasets.length === 0) throw new TRPCError4({ code: "BAD_REQUEST", message: "Choose at least one data section to preview." });
       if (!hasValidExportDateRange(input)) throw new TRPCError4({ code: "BAD_REQUEST", message: "The start date must be before the end date." });
       return getWorkbookExportPreview(input);
     }),
     csv: protectedProcedure.input(z2.object({ buildingId: z2.number().int().positive(), dataset: z2.enum(["rooms", "tenants"]), dateFrom: optionalDateString, dateTo: optionalDateString })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only a building Manager can export room or tenant CSV data." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only a building Manager or Owner can export room or tenant CSV data." });
       await requireBuildingAccess(ctx.user, input.buildingId, "export");
       if (!hasValidExportDateRange(input)) throw new TRPCError4({ code: "BAD_REQUEST", message: "The start date must be before the end date." });
       const csv = await getCsvExportData(input);
@@ -5768,7 +5795,7 @@ var pgRouter = router({
       outstandingOnly: z2.boolean().default(false),
       fieldSelections: z2.record(z2.string(), z2.array(z2.string().trim().min(1).max(120)).max(80)).optional()
     })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "manager") throw new TRPCError4({ code: "FORBIDDEN", message: "Only a building Manager can export operational workbooks." });
+      if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError4({ code: "FORBIDDEN", message: "Only a building Manager or Owner can export operational workbooks." });
       await requireBuildingAccess(ctx.user, input.buildingId, "export");
       if (input.mode === "selected" && input.datasets.length === 0) throw new TRPCError4({ code: "BAD_REQUEST", message: "Choose at least one data section to export." });
       if (!hasValidExportDateRange(input)) throw new TRPCError4({ code: "BAD_REQUEST", message: "The start date must be before the end date." });

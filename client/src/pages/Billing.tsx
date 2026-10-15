@@ -179,10 +179,11 @@ export default function Billing() {
   const generateCycle = trpc.pg.rent.generateCycle.useMutation();
   const refreshAlerts = trpc.pg.notifications.refresh.useMutation();
   const uploadImage = trpc.pg.uploads.image.useMutation({ onError: error => { uploadFeedback.clear(); toast.error(error.message); } });
-  const allocationOptions = useMemo(() => snapshot.data?.allocations.filter(item => item.status === "active").map(allocation => ({ allocation, tenant: snapshot.data?.tenants.find(tenant => tenant.id === allocation.tenantId), room: snapshot.data?.rooms.find(room => room.id === allocation.roomId) })) ?? [], [snapshot.data]);
+  const allocationOptions = useMemo(() => (snapshot.data?.allocations ?? []).filter(item => item.status === "active").map(allocation => ({ allocation, tenant: (snapshot.data?.tenants ?? []).find(tenant => tenant.id === allocation.tenantId), room: (snapshot.data?.rooms ?? []).find(room => room.id === allocation.roomId) })) ?? [], [snapshot.data]);
   if (buildingsQuery.isLoading) return <LoadingState />;
   if (!building || !buildingId) return <BuildingEmptyState />;
   if (snapshot.isLoading || !snapshot.data) return <LoadingState />;
+  const snap = snapshot.data ?? { tenants: [], rooms: [], allocations: [], tenantCharges: [], rents: [], electricity: [], tenantServices: [], tenantTransfers: [] };
 
   const selectedAllocation = allocationOptions.find(item => item.allocation.id === selectedAllocationId);
   const uploadFromForm = async (form: FormData, fileName: string, valueName: string, purpose: "receipt" | "meter") => {
@@ -220,41 +221,41 @@ export default function Billing() {
   };
   const submitTenantCharge = async (event: FormEvent<HTMLFormElement>, charge: NonNullable<typeof editingTenantCharge>) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const receiptUrl = await uploadFromForm(form, "receipt", "receiptUrl", "receipt"); uploadFeedback.markSaving(); await updateTenantCharge.mutateAsync({ id: charge.id, buildingId, expectedUpdatedAt: charge.updatedAt, paidAmountPaise: toPaise(String(form.get("paid"))), paidOn: String(form.get("paidOn")) || undefined, paymentMethod: String(form.get("paymentMethod")) as "cash" | "upi" | "bank_transfer", receiptUrl: receiptUrl || undefined }); } catch (error) { uploadFeedback.clear(); toast.error(error instanceof Error ? error.message : "Receipt could not be uploaded."); } };
   const isRent = mode === "rent";
-  const editingRent = snapshot.data.rents.find(rent => rent.id === editingRentId);
-  const editingBill = snapshot.data.electricity.find(bill => bill.id === editingBillId);
-  const editingTenantCharge = snapshot.data.tenantCharges.find(charge => charge.id === editingTenantChargeId);
-  const editingBillTenantCharges = editingBill ? snapshot.data.tenantCharges.filter(charge => charge.sourceType === "electricity" && charge.sourceId === editingBill.id) : [];
+  const editingRent = snap.rents.find(rent => rent.id === editingRentId);
+  const editingBill = snap.electricity.find(bill => bill.id === editingBillId);
+  const editingTenantCharge = snap.tenantCharges.find(charge => charge.id === editingTenantChargeId);
+  const editingBillTenantCharges = editingBill ? snap.tenantCharges.filter(charge => charge.sourceType === "electricity" && charge.sourceId === editingBill.id) : [];
   const imageUploadFields = (kind: "receipt" | "meter", value?: string | null) => <><Field label={`${kind === "receipt" ? "Receipt" : "Meter reading"} image URL`}><input name={kind === "receipt" ? "receiptUrl" : "meterImageUrl"} type="url" defaultValue={value ?? ""} placeholder="https://…" className={fieldClass} /></Field><Field label={`Or upload ${kind === "receipt" ? "receipt" : "meter image"}`}><input name={kind === "receipt" ? "receipt" : "meterImage"} type="file" accept="image/jpeg,image/png,image/webp" className="block h-11 w-full cursor-pointer rounded-xl border border-border bg-background px-3 py-2 text-sm file:mr-3 file:rounded-lg file:border-0 file:bg-primary/10 file:px-2 file:py-1 file:text-xs file:font-semibold file:text-primary" /></Field><div className="sm:col-span-2">{uploadFeedback.state ? <UploadProgress {...uploadFeedback.state} onCancel={uploadFeedback.cancel} onRetry={() => void uploadFeedback.retry()} onDismiss={uploadFeedback.clear} /> : null}</div></>;
   const submitLabel = (pending: boolean, label: string) => <button type="submit" disabled={pending || uploadImage.isPending || Boolean(uploadFeedback.state)} className="inline-flex h-11 items-center justify-center rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60">{pending || uploadImage.isPending ? "Saving…" : label}</button>;
-  const monthlyRents = snapshot.data.rents.filter(rent => rent.rentMonth === billingMonth);
+  const monthlyRents = snap.rents.filter(rent => rent.rentMonth === billingMonth);
   const monthlyRentExpectedPaise = monthlyRents.reduce((total, rent) => total + rent.expectedAmountPaise, 0);
   const monthlyRentPaidPaise = monthlyRents.reduce((total, rent) => total + rent.paidAmountPaise, 0);
-  const monthlyElectricity = snapshot.data.electricity.filter(bill => bill.billingMonth === billingMonth);
+  const monthlyElectricity = snap.electricity.filter(bill => bill.billingMonth === billingMonth);
   const monthlyElectricityBilledPaise = monthlyElectricity.reduce((total, bill) => total + bill.billAmountPaise, 0);
   const monthlyElectricityPaidPaise = monthlyElectricity.reduce((total, bill) => total + bill.paidAmountPaise, 0);
-  const unbilledMeterRooms = snapshot.data.rooms.filter(room => !monthlyElectricity.some(bill => bill.roomId === room.id));
+  const unbilledMeterRooms = snap.rooms.filter(room => !monthlyElectricity.some(bill => bill.roomId === room.id));
   const uploadMeterPhoto = async (dataUrl: string) => (await uploadImage.mutateAsync({ dataUrl, purpose: "meter" })).url;
   const saveMeterReading = async (input: { roomId: number; previousReading: number; currentReading: number; dueDate?: string; notes?: string; meterImageUrl?: string }) => {
     await electricityMutation.mutateAsync({ buildingId, roomId: input.roomId, billingMonth: billingMonth, previousReading: input.previousReading, currentReading: input.currentReading, dueDate: input.dueDate, notes: input.notes, meterImageUrl: input.meterImageUrl ?? "" });
   };
   const earliestDueDate = (dates: Array<string | null | undefined>) => dates.filter((date): date is string => Boolean(date)).sort()[0];
-  const monthlyTenantCharges = snapshot.data.tenantCharges.filter(charge => charge.billingMonth === billingMonth);
-  const tenantBillingRows = snapshot.data.tenants.filter(tenant => tenant.status === "active").map(tenant => {
+  const monthlyTenantCharges = snap.tenantCharges.filter(charge => charge.billingMonth === billingMonth);
+  const tenantBillingRows = snap.tenants.filter(tenant => tenant.status === "active").map(tenant => {
     const rents = monthlyRents.filter(rent => rent.tenantId === tenant.id);
     const charges = monthlyTenantCharges.filter(charge => charge.tenantId === tenant.id);
-    const allocation = snapshot.data.allocations.find(item => item.tenantId === tenant.id && item.status === "active");
-    return { tenant, room: snapshot.data.rooms.find(room => room.id === allocation?.roomId), rentExpectedPaise: rents.reduce((total, rent) => total + rent.expectedAmountPaise, 0), rentPaidPaise: rents.reduce((total, rent) => total + rent.paidAmountPaise, 0), rentDueDate: earliestDueDate(rents.map(rent => rent.dueDate)), chargeExpectedPaise: charges.reduce((total, charge) => total + charge.expectedAmountPaise, 0), chargePaidPaise: charges.reduce((total, charge) => total + charge.paidAmountPaise, 0), chargeDueDate: earliestDueDate(charges.map(charge => charge.dueDate)) };
+    const allocation = snap.allocations.find(item => item.tenantId === tenant.id && item.status === "active");
+    return { tenant, room: snap.rooms.find(room => room.id === allocation?.roomId), rentExpectedPaise: rents.reduce((total, rent) => total + rent.expectedAmountPaise, 0), rentPaidPaise: rents.reduce((total, rent) => total + rent.paidAmountPaise, 0), rentDueDate: earliestDueDate(rents.map(rent => rent.dueDate)), chargeExpectedPaise: charges.reduce((total, charge) => total + charge.expectedAmountPaise, 0), chargePaidPaise: charges.reduce((total, charge) => total + charge.paidAmountPaise, 0), chargeDueDate: earliestDueDate(charges.map(charge => charge.dueDate)) };
   }).filter(row => row.rentExpectedPaise > 0 || row.chargeExpectedPaise > 0);
-  const roomBillingRows = snapshot.data.rooms.map(room => {
-    const rents = monthlyRents.filter(rent => snapshot.data.allocations.find(allocation => allocation.id === rent.allocationId)?.roomId === room.id);
+  const roomBillingRows = snap.rooms.map(room => {
+    const rents = monthlyRents.filter(rent => snap.allocations.find(allocation => allocation.id === rent.allocationId)?.roomId === room.id);
     const electricity = monthlyElectricity.filter(bill => bill.roomId === room.id);
     const charges = monthlyTenantCharges.filter(charge => charge.roomId === room.id && charge.sourceType !== "electricity");
     return { room, rentExpectedPaise: rents.reduce((total, rent) => total + rent.expectedAmountPaise, 0), rentPaidPaise: rents.reduce((total, rent) => total + rent.paidAmountPaise, 0), rentDueDate: earliestDueDate(rents.map(rent => rent.dueDate)), electricityExpectedPaise: electricity.reduce((total, bill) => total + bill.billAmountPaise, 0), electricityPaidPaise: electricity.reduce((total, bill) => total + bill.paidAmountPaise, 0), electricityDueDate: earliestDueDate(electricity.map(bill => bill.dueDate)), chargeExpectedPaise: charges.reduce((total, charge) => total + charge.expectedAmountPaise, 0), chargePaidPaise: charges.reduce((total, charge) => total + charge.paidAmountPaise, 0), chargeDueDate: earliestDueDate(charges.map(charge => charge.dueDate)) };
   }).filter(row => row.rentExpectedPaise > 0 || row.electricityExpectedPaise > 0 || row.chargeExpectedPaise > 0);
   const pendingReceiptReviews = [
-    ...snapshot.data.rents.filter(rent => rent.receiptReviewStatus === "pending" && rent.receiptUrl).map(rent => ({ type: "rent" as const, record: rent, title: `Rent · ${rent.rentMonth}`, subject: snapshot.data.tenants.find(tenant => tenant.id === rent.tenantId)?.fullName ?? "Tenant" })),
-    ...snapshot.data.electricity.filter(bill => bill.receiptReviewStatus === "pending" && bill.receiptUrl).map(bill => ({ type: "electricity" as const, record: bill, title: `Electricity · ${bill.billingMonth}`, subject: `Room ${snapshot.data.rooms.find(room => room.id === bill.roomId)?.number ?? "—"}` })),
-    ...snapshot.data.tenantCharges.filter(charge => charge.receiptReviewStatus === "pending" && charge.receiptUrl).map(charge => ({ type: "tenant_charge" as const, record: charge, title: charge.title, subject: snapshot.data.tenants.find(tenant => tenant.id === charge.tenantId)?.fullName ?? "Tenant" })),
+    ...snap.rents.filter(rent => rent.receiptReviewStatus === "pending" && rent.receiptUrl).map(rent => ({ type: "rent" as const, record: rent, title: `Rent · ${rent.rentMonth}`, subject: snap.tenants.find(tenant => tenant.id === rent.tenantId)?.fullName ?? "Tenant" })),
+    ...snap.electricity.filter(bill => bill.receiptReviewStatus === "pending" && bill.receiptUrl).map(bill => ({ type: "electricity" as const, record: bill, title: `Electricity · ${bill.billingMonth}`, subject: `Room ${snap.rooms.find(room => room.id === bill.roomId)?.number ?? "—"}` })),
+    ...snap.tenantCharges.filter(charge => charge.receiptReviewStatus === "pending" && charge.receiptUrl).map(charge => ({ type: "tenant_charge" as const, record: charge, title: charge.title, subject: snap.tenants.find(tenant => tenant.id === charge.tenantId)?.fullName ?? "Tenant" })),
   ];
   const visibleReceiptReviewHistory = (receiptReviewHistory.data ?? []).filter(item => receiptHistoryFilter === "all" || item.status === receiptHistoryFilter);
   const refreshCollection = async () => {
@@ -266,9 +267,9 @@ export default function Billing() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Collection maintenance could not be completed."); }
   };
   const deletableBillingRecords = [
-    ...snapshot.data.rents.map(rent => ({ key: `rent-${rent.id}`, kind: "rent" as const, id: rent.id, label: `Rent · ${snapshot.data.tenants.find(tenant => tenant.id === rent.tenantId)?.fullName ?? "Tenant"} · ${rent.rentMonth}` })),
-    ...snapshot.data.electricity.filter(bill => bill.paidAmountPaise === 0).map(bill => ({ key: `electricity-${bill.id}`, kind: "electricity" as const, id: bill.id, label: `Room electricity · ${snapshot.data.rooms.find(room => room.id === bill.roomId)?.number ?? "—"} · ${bill.billingMonth}` })),
-    ...snapshot.data.tenantCharges.filter(charge => charge.paidAmountPaise === 0).map(charge => ({ key: `charge-${charge.id}`, kind: "charge" as const, id: charge.id, label: `Tenant charge · ${charge.title}` })),
+    ...snap.rents.map(rent => ({ key: `rent-${rent.id}`, kind: "rent" as const, id: rent.id, label: `Rent · ${snap.tenants.find(tenant => tenant.id === rent.tenantId)?.fullName ?? "Tenant"} · ${rent.rentMonth}` })),
+    ...snap.electricity.filter(bill => bill.paidAmountPaise === 0).map(bill => ({ key: `electricity-${bill.id}`, kind: "electricity" as const, id: bill.id, label: `Room electricity · ${snap.rooms.find(room => room.id === bill.roomId)?.number ?? "—"} · ${bill.billingMonth}` })),
+    ...snap.tenantCharges.filter(charge => charge.paidAmountPaise === 0).map(charge => ({ key: `charge-${charge.id}`, kind: "charge" as const, id: charge.id, label: `Tenant charge · ${charge.title}` })),
   ];
   const selectedDeleteRecord = deletableBillingRecords.find(record => record.key === deleteRecordKey) ?? null;
   const requestBillingDeletion = (record: { kind: "rent" | "electricity" | "charge"; id: number; label: string }) => deletionSafety.requestDelete({ label: record.label, onConfirm: () => {
