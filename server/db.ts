@@ -799,7 +799,34 @@ export async function getDb(): Promise<DatabaseConnection | null> {
         ?? process.env.POSTGRES_URL
         ?? process.env.POSTGRES_PRISMA_URL
         ?? process.env.POSTGRES_URL_NON_POOLING;
-      if (!connectionString || connectionString.includes("<") || connectionString.includes(">") || usingEmbeddedFallback) {
+function hasPlaceholderPassword(urlStr: string): boolean {
+  if (!urlStr) return true;
+  if (
+    urlStr.includes("<") ||
+    urlStr.includes(">") ||
+    urlStr.includes("%3C") ||
+    urlStr.includes("%3E") ||
+    urlStr.includes("[YOUR-PASSWORD]") ||
+    urlStr.includes("YOUR_PASSWORD") ||
+    urlStr.includes("your-password") ||
+    urlStr.includes("url-encoded-password")
+  ) {
+    return true;
+  }
+  try {
+    const u = new URL(urlStr);
+    const decoded = decodeURIComponent(u.password);
+    if (decoded.includes("<") || decoded.includes(">") || decoded.toLowerCase().includes("password") || decoded.toLowerCase().includes("placeholder")) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+      if (!connectionString || hasPlaceholderPassword(connectionString) || usingEmbeddedFallback) {
+        if (connectionString && hasPlaceholderPassword(connectionString)) {
+          console.warn("[Database Notice] SUPABASE_DATABASE_URL contains a placeholder password. Set your real Supabase password in Vercel to sync data across deployments.");
+        }
         usingEmbeddedFallback = true;
         return await initEmbeddedPglite();
       }
