@@ -1,5 +1,7 @@
 import * as XLSX from "xlsx";
-import { Check, Database, Download, ExternalLink, FileSpreadsheet, Filter, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { Check, Database, Download, ExternalLink, FileSpreadsheet, FileText, Filter, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { User } from "firebase/auth";
 import { toast } from "sonner";
@@ -45,6 +47,49 @@ const datasets = [
 
 type DatasetId = (typeof datasets)[number]["id"];
 type ExportSheet = { name: string; rows: Record<string, string | number | boolean | null>[] };
+
+function createPdf(sheets: ExportSheet[], buildingName: string, fileName: string) {
+  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+  let isFirstSheet = true;
+
+  sheets.forEach(sheet => {
+    if (!isFirstSheet) {
+      doc.addPage();
+    }
+    isFirstSheet = false;
+
+    doc.setFontSize(16);
+    doc.setTextColor(18, 59, 56);
+    doc.text(`Golden Prime PG — ${buildingName}`, 40, 36);
+
+    doc.setFontSize(10);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Section: ${sheet.name} · Exported on ${new Date().toLocaleDateString("en-IN")}`, 40, 52);
+
+    if (sheet.rows.length === 0) {
+      doc.setFontSize(10);
+      doc.setTextColor(148, 163, 184);
+      doc.text("No records found for this section.", 40, 75);
+      return;
+    }
+
+    const headers = Array.from(new Set(sheet.rows.flatMap(row => Object.keys(row))));
+    const data = sheet.rows.map(row => headers.map(h => String(row[h] ?? "—")));
+
+    autoTable(doc, {
+      startY: 64,
+      head: [headers],
+      body: data,
+      theme: "grid",
+      styles: { fontSize: 7, cellPadding: 3, overflow: "linebreak" },
+      headStyles: { fillColor: [18, 59, 56], textColor: [255, 255, 255], fontStyle: "bold" },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      margin: { left: 40, right: 40, bottom: 40 },
+    });
+  });
+
+  doc.save(fileName);
+}
 
 function createWorkbook(sheets: ExportSheet[], fileName: string) {
   const workbook = XLSX.utils.book_new();
@@ -184,6 +229,21 @@ export default function Exports() {
   const download = () => {
     if (mode === "selected" && selected.length === 0) return toast.error("Select at least one data section first.");
     prepareWorkbook.mutate(getWorkbookMutationInput());
+  };
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const downloadPdf = async () => {
+    if (mode === "selected" && selected.length === 0) return toast.error("Select at least one data section first.");
+    setIsExportingPdf(true);
+    try {
+      const data = await prepareSheetsData.mutateAsync(getWorkbookMutationInput());
+      const fileName = `${data.buildingName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")}-${mode}-export-${new Date().toISOString().slice(0, 10)}.pdf`;
+      createPdf(data.sheets, data.buildingName, fileName);
+      toast.success("PDF report generated and downloaded");
+    } catch (err: any) {
+      toast.error(err instanceof Error ? err.message : "Failed to generate PDF report.");
+    } finally {
+      setIsExportingPdf(false);
+    }
   };
   const handleGoogleLogin = async () => {
     setIsGoogleSigningIn(true);
@@ -419,6 +479,13 @@ export default function Exports() {
     <section className="export-scope-card overflow-hidden rounded-3xl border border-border/70 bg-card shadow-[0_10px_28px_rgba(23,43,77,0.05)]"><div className="border-b border-border px-5 py-4"><p className="text-sm font-semibold">Choose export scope</p><p className="mt-1 text-xs text-muted-foreground">All exports are restricted to <span className="font-semibold text-foreground">{building.name}</span>.</p></div><div className="p-5"><div className="grid gap-3 sm:grid-cols-2"><button type="button" onClick={() => setMode("selected")} className={`rounded-2xl border p-4 text-left transition ${mode === "selected" ? "border-primary bg-primary/[0.05] ring-4 ring-primary/10" : "border-border hover:border-primary/35"}`}><div className="flex items-center justify-between gap-3"><span className="font-semibold">Selected data</span>{mode === "selected" ? <Check className="h-4 w-4 text-primary" /> : null}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Pick sections, filters, and visible workbook fields.</p></button><button type="button" onClick={() => setMode("complete")} className={`rounded-2xl border p-4 text-left transition ${mode === "complete" ? "border-primary bg-primary/[0.05] ring-4 ring-primary/10" : "border-border hover:border-primary/35"}`}><div className="flex items-center justify-between gap-3"><span className="font-semibold">Complete operational data</span>{mode === "complete" ? <Check className="h-4 w-4 text-primary" /> : null}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Export all current building operations into separate sheets, while excluding authentication secrets.</p></button></div>
       {mode === "selected" ? <><div className="mt-6 flex items-center gap-2"><Filter className="h-4 w-4 text-primary" /><div><h3 className="text-sm font-semibold">Filters</h3><p className="mt-1 text-xs text-muted-foreground">These filters apply consistently to selected financial sections and the preview below.</p></div></div><div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label className="grid gap-1 text-sm font-medium">From date<input type="date" value={dateFrom} onChange={event => setDateFrom(event.target.value)} className={fieldClass} /></label><label className="grid gap-1 text-sm font-medium">To date<input type="date" value={dateTo} onChange={event => setDateTo(event.target.value)} min={dateFrom || undefined} className={fieldClass} /></label><label className="grid gap-1 text-sm font-medium">Payment status<select value={paymentStatus} onChange={event => setPaymentStatus(event.target.value as typeof paymentStatus)} className={fieldClass}><option value="all">All statuses</option><option value="paid">Paid</option><option value="pending">Pending</option><option value="partial">Partial</option></select></label><label className="flex items-end gap-3 rounded-xl border border-border bg-muted/30 px-3 py-2 text-sm font-medium"><input type="checkbox" checked={outstandingOnly} onChange={event => setOutstandingOnly(event.target.checked)} className="h-4 w-4 accent-primary" />Outstanding balances only</label></div><div className="mt-6 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Data sections</h3><p className="mt-1 text-xs text-muted-foreground">{selected.length} section{selected.length === 1 ? "" : "s"} selected.</p></div><button type="button" onClick={() => setSelected(datasets.map(dataset => dataset.id))} className="text-xs font-semibold text-primary underline-offset-2 hover:underline">Select all</button></div><div className="export-dataset-grid mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{datasets.map(dataset => <button key={dataset.id} type="button" onClick={() => toggleDataset(dataset.id)} className={`export-dataset-card rounded-2xl border p-3 text-left transition ${selectedLabels.has(dataset.id) ? "border-primary bg-primary/[0.05]" : "border-border hover:border-primary/30"}`}><span className="flex items-start justify-between gap-3"><span><span className="block text-sm font-semibold">{dataset.label}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{dataset.description}</span></span>{selectedLabels.has(dataset.id) ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> : null}</span></button>)}</div>
         <section className="mt-6 rounded-2xl border border-primary/20 bg-primary/[0.025] p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold">Export preview and visible fields</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Use the field controls to choose the columns included in each selected workbook sheet.</p></div>{workbookPreview.isFetching ? <span className="text-xs font-semibold text-primary">Refreshing preview…</span> : null}</div>{workbookPreview.isError ? <p className="mt-3 text-sm text-rose-700">{workbookPreview.error.message}</p> : null}{workbookPreview.data?.sheets.length === 0 ? <p className="mt-3 text-sm text-muted-foreground">No rows match the selected filters. Adjust filters to review available fields.</p> : <div className="mt-4 space-y-4">{workbookPreview.data?.sheets.map(sheet => { const visibleFields = sheet.fields.filter(field => (fieldSelections[sheet.dataset] ?? sheet.fields).includes(field)); return <article key={sheet.dataset} className="rounded-xl border border-border bg-card p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="text-sm font-semibold capitalize">{sheet.dataset}</h4><p className="mt-0.5 text-xs text-muted-foreground">{sheet.rowCount} matching row{sheet.rowCount === 1 ? "" : "s"} · {visibleFields.length} of {sheet.fields.length} fields visible</p></div>{sheet.fields.length > 0 ? <button type="button" onClick={() => setFieldSelections(current => ({ ...current, [sheet.dataset]: sheet.fields }))} className="text-xs font-semibold text-primary underline-offset-2 hover:underline">Show all fields</button> : null}</div>{sheet.fields.length === 0 ? <p className="mt-3 text-xs text-muted-foreground">No matching rows are available for this sheet with the active filters.</p> : <><div className="mt-3 flex flex-wrap gap-2">{sheet.fields.map(field => { const checked = visibleFields.includes(field); return <label key={field} className={`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs font-medium ${checked ? "border-primary/30 bg-primary/[0.05] text-primary" : "border-border bg-background text-muted-foreground"}`}><input type="checkbox" checked={checked} onChange={() => toggleField(sheet.dataset, field, sheet.fields)} className="h-3.5 w-3.5 accent-primary" />{field}</label>; })}</div><div className="mt-3 overflow-x-auto rounded-lg border border-border"><table className="min-w-full text-left text-xs"><thead className="bg-muted/50"><tr>{visibleFields.map(field => <th key={field} className="whitespace-nowrap px-2.5 py-2 font-semibold">{field}</th>)}</tr></thead><tbody>{sheet.sampleRows.map((row, index) => <tr key={index} className="border-t border-border/70">{visibleFields.map(field => <td key={field} className="max-w-48 truncate px-2.5 py-2 text-muted-foreground">{String(row[field] ?? "—")}</td>)}</tr>)}</tbody></table></div></>}</article>; })}</div>}</section></> : <div className="mt-6 rounded-2xl border border-primary/20 bg-primary/[0.035] p-4"><div className="flex items-start gap-3"><Database className="mt-0.5 h-5 w-5 text-primary" /><div><h3 className="text-sm font-semibold">Complete building operational workbook</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">Includes building profile, rooms, tenants, allocations, rent, electricity, tenant charges, expenses, operating costs, services, reminders, transfers, settlements, utility bills, Manager-result adjustments, safe account roster, notifications, building audit history, and export history. It intentionally excludes every password, hash, token, session, and database secret.</p></div></div></div>}
-      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-border pt-5"><PrimaryAction onClick={download}>{prepareWorkbook.isPending ? "Preparing workbook…" : <><Download className="mr-1.5 h-4 w-4" />Download Excel workbook</>}</PrimaryAction><span className="text-xs text-muted-foreground">{mode === "selected" ? "Selected sheets honor filters and visible fields above." : "Complete export includes all operational records for this building."}</span></div></div></section>
+      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-border pt-5">
+        <PrimaryAction onClick={download}>{prepareWorkbook.isPending ? "Preparing workbook…" : <><Download className="mr-1.5 h-4 w-4" />Download Excel workbook</>}</PrimaryAction>
+        <button type="button" onClick={() => void downloadPdf()} disabled={isExportingPdf} className="inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-primary/30 bg-primary/10 px-4 text-sm font-semibold text-primary transition hover:bg-primary/20 disabled:opacity-60">
+          <FileText className="h-4 w-4" />
+          {isExportingPdf ? "Generating PDF…" : "Download PDF report"}
+        </button>
+        <span className="text-xs text-muted-foreground">{mode === "selected" ? "Selected sheets honor filters and visible fields above." : "Complete export includes all operational records for this building."}</span>
+      </div></div></section>
   </div>;
 }

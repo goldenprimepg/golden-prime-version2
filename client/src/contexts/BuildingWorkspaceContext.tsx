@@ -70,8 +70,18 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     setBuildingIdState(id);
     window.localStorage.setItem(STORAGE_KEY, String(id));
   };
-  const building = useMemo(() => buildingsQuery.data?.find(item => item.id === buildingId) ?? null, [buildingId, buildingsQuery.data]);
-  const liveWorkspaceSnapshot = trpc.pg.operations.snapshot.useQuery({ buildingId: buildingId ?? 0 }, { enabled: Boolean(buildingId) && isOnline, ...liveQueryOptions, placeholderData: (prev: any) => prev });
+  const effectiveBuildingId = useMemo(() => {
+    if (buildingsQuery.data && buildingsQuery.data.length > 0) {
+      if (buildingId && buildingsQuery.data.some(b => b.id === buildingId)) {
+        return buildingId;
+      }
+      return buildingsQuery.data[0].id;
+    }
+    return buildingId;
+  }, [buildingId, buildingsQuery.data]);
+
+  const building = useMemo(() => buildingsQuery.data?.find(item => item.id === effectiveBuildingId) ?? null, [effectiveBuildingId, buildingsQuery.data]);
+  const liveWorkspaceSnapshot = trpc.pg.operations.snapshot.useQuery({ buildingId: effectiveBuildingId ?? 0 }, { enabled: Boolean(effectiveBuildingId) && isOnline, ...liveQueryOptions, placeholderData: (prev: any) => prev });
   
   const [snapshotTimedOut, setSnapshotTimedOut] = useState(false);
   useEffect(() => {
@@ -190,7 +200,7 @@ export function BuildingWorkspaceProvider({ children }: { children: React.ReactN
     saveOfflineWorkspaceSnapshot({ userId: user.id, buildingId, building, data: liveWorkspaceSnapshot.data as Record<string, unknown> });
   }, [building, buildingId, liveWorkspaceSnapshot.data, user]);
 
-  return <BuildingWorkspaceContext.Provider value={{ buildingsQuery, buildingId, building, setBuildingId, isOfflineSnapshot: Boolean(!isOnline && offlineSnapshot), snapshotQuery, isRefreshing, invalidateWorkspace, lastSyncedAt }}>{children}</BuildingWorkspaceContext.Provider>;
+  return <BuildingWorkspaceContext.Provider value={{ buildingsQuery, buildingId: effectiveBuildingId, building, setBuildingId, isOfflineSnapshot: Boolean(!isOnline && offlineSnapshot), snapshotQuery, isRefreshing, invalidateWorkspace, lastSyncedAt }}>{children}</BuildingWorkspaceContext.Provider>;
 }
 
 export function useBuildingWorkspace() {

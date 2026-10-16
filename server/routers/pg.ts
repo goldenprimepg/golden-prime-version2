@@ -225,9 +225,9 @@ export const pgRouter = router({
       if (input.periodKey && ((input.periodMode === "monthly" && !/^\d{4}-(0[1-9]|1[0-2])$/.test(input.periodKey)) || (input.periodMode === "yearly" && !/^\d{4}$/.test(input.periodKey)))) context.addIssue({ code: "custom", message: "Choose a valid reporting month or year.", path: ["periodKey"] });
     })).query(async ({ ctx, input }) => {
       if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "The Owner dashboard is intentionally limited to the approved summary." });
-      await requireBuildingAccess(ctx.user, input.buildingId, "read");
+      const building = await requireBuildingAccess(ctx.user, input.buildingId, "read");
       const accessibleBuildings = await listBuildingsForUser(ctx.user);
-      return getDashboardOverview(input.buildingId, accessibleBuildings.length, input.periodMode, input.periodKey);
+      return getDashboardOverview(building.id, accessibleBuildings.length, input.periodMode, input.periodKey);
     }),
   }),
 
@@ -263,9 +263,9 @@ export const pgRouter = router({
   profit: router({
     get: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), periodKey: monthString.optional() })).query(async ({ ctx, input }) => {
       if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can view the operational profit workspace." });
-      await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
+      const building = await requireBuildingAccess(ctx.user, input.buildingId, "manageExpenses");
       const accessibleBuildings = await listBuildingsForUser(ctx.user);
-      return getManagerProfitWorkspace({ buildingId: input.buildingId, totalBuildings: accessibleBuildings.length, periodMode: "monthly", periodKey: input.periodKey });
+      return getManagerProfitWorkspace({ buildingId: building.id, totalBuildings: accessibleBuildings.length, periodMode: "monthly", periodKey: input.periodKey });
     }),
     saveOwnerSettlement: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), billingMonth: monthString, expectedAmountPaise: z.number().int().positive(), paidAmountPaise: z.number().int().min(0), dueDate: dateString, paidOn: optionalDateString, paymentMethod: z.enum(["cash", "upi", "bank_transfer", "cheque"]).optional(), notes: z.string().trim().max(800).optional(), receiptUrl: optionalStoredImageUrl }).refine(input => input.paidAmountPaise <= input.expectedAmountPaise, { message: "Paid amount cannot exceed the Owner settlement amount.", path: ["paidAmountPaise"] })).mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Only the Manager or Owner can record an Owner settlement." });
@@ -294,8 +294,8 @@ export const pgRouter = router({
   operations: router({
     snapshot: protectedProcedure.input(z.object({ buildingId: z.number().int().positive() })).query(async ({ ctx, input }) => {
       if (ctx.user.role !== "manager" && ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Operational data is available only in the Manager and Owner workspace." });
-      await requireBuildingAccess(ctx.user, input.buildingId, "read");
-      return getBuildingSnapshot(input.buildingId);
+      const building = await requireBuildingAccess(ctx.user, input.buildingId, "read");
+      return getBuildingSnapshot(building.id);
     }),
     addFloor: protectedProcedure.input(z.object({ buildingId: z.number().int().positive(), name: z.string().trim().min(1).max(80), level: z.number().int().min(0).max(200) })).mutation(async ({ ctx, input }) => {
       await requireBuildingAccess(ctx.user, input.buildingId, "manageRooms");

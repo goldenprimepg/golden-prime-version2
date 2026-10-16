@@ -635,6 +635,62 @@ async function seedEmbeddedDatabase(db: DatabaseConnection, pglite?: PGlite) {
   }
 }
 
+function getSchemaSql(): string {
+  if (typeof __EMBEDDED_SCHEMA_SQL__ === "string" && __EMBEDDED_SCHEMA_SQL__.length > 0) {
+    return __EMBEDDED_SCHEMA_SQL__;
+  }
+  const candidates = [
+    process.env.LAMBDA_TASK_ROOT ? path.resolve(process.env.LAMBDA_TASK_ROOT, "supabase", "schema.sql") : "",
+    path.resolve(process.cwd(), "supabase", "schema.sql"),
+    path.resolve(process.cwd(), "..", "supabase", "schema.sql"),
+    path.resolve(import.meta.dirname, "..", "supabase", "schema.sql"),
+    path.resolve(import.meta.dirname, "supabase", "schema.sql"),
+  ].filter(Boolean);
+  for (const cand of candidates) {
+    try {
+      if (fs.existsSync(cand)) {
+        return fs.readFileSync(cand, "utf8");
+      }
+    } catch {}
+  }
+  try {
+    return fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+async function ensurePostgresSchema(pool: Pool) {
+  try {
+    const check = await pool.query<{ reg: string | null }>("SELECT to_regclass('public.buildings') AS reg");
+    if (!check.rows[0]?.reg) {
+      console.log("[Supabase] public.buildings table not found. Auto-migrating Supabase cloud schema...");
+      const rawSql = getSchemaSql();
+      if (rawSql) {
+        const statements = rawSql
+          .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "")
+          .split("--> statement-breakpoint");
+
+        for (const stmt of statements) {
+          const trimmed = stmt.trim();
+          if (!trimmed) continue;
+          try {
+            await pool.query(trimmed);
+          } catch (err: any) {
+            if (err.code === "42710" || err.code === "42P07" || err.message?.includes("already exists")) {
+              continue;
+            }
+            console.warn("[Supabase Schema Setup Notice]:", err.message);
+          }
+        }
+        console.log("[Supabase] Database schema initialized successfully on cloud!");
+      }
+    }
+  } catch (schemaErr: any) {
+    console.error("[Supabase Schema Init Error]:", schemaErr.message);
+  }
+}
+
 let forceInMemoryEmbedded = false;
 
 async function initEmbeddedPglite(): Promise<DatabaseConnection> {
@@ -661,33 +717,13 @@ async function initEmbeddedPglite(): Promise<DatabaseConnection> {
 
       const check = await pglite.query<{ reg: string | null }>("SELECT to_regclass('public.users') AS reg");
       if (!check.rows[0]?.reg) {
-        let rawSql: string | undefined;
-        if (typeof __EMBEDDED_SCHEMA_SQL__ === "string" && __EMBEDDED_SCHEMA_SQL__.length > 0) {
-          rawSql = __EMBEDDED_SCHEMA_SQL__;
-        } else {
-          const candidates = [
-            process.env.LAMBDA_TASK_ROOT ? path.resolve(process.env.LAMBDA_TASK_ROOT, "supabase", "schema.sql") : "",
-            path.resolve(process.cwd(), "supabase", "schema.sql"),
-            path.resolve(process.cwd(), "..", "supabase", "schema.sql"),
-            path.resolve(import.meta.dirname, "..", "supabase", "schema.sql"),
-            path.resolve(import.meta.dirname, "supabase", "schema.sql"),
-          ].filter(Boolean);
-          for (const cand of candidates) {
-            try {
-              if (fs.existsSync(cand)) {
-                rawSql = fs.readFileSync(cand, "utf8");
-                break;
-              }
-            } catch {}
-          }
-          if (!rawSql) {
-            rawSql = fs.readFileSync(path.resolve(process.cwd(), "supabase", "schema.sql"), "utf8");
-          }
-        }
+        const rawSql = getSchemaSql();
         const rawSchema = rawSql
           .replace(/--> statement-breakpoint/g, "\n")
           .replace(/REVOKE ALL ON FUNCTION public\.set_updated_at\(\) FROM (anon|authenticated);/g, "");
-        await pglite.exec(rawSchema);
+        if (rawSchema.trim()) {
+          await pglite.exec(rawSchema);
+        }
       }
 
       const db = drizzlePglite(pglite, { schema: postgresSchema }) as unknown as DatabaseConnection;
@@ -779,11 +815,14 @@ export async function getDb(): Promise<DatabaseConnection | null> {
       });
       try {
         await pool.query("SELECT 1");
+        await ensurePostgresSchema(pool);
         cachedPostgresPool = pool;
         cachedDb = drizzlePostgres(cachedPostgresPool, { schema: postgresSchema });
         await seedEmbeddedDatabase(cachedDb);
+        console.log("[Supabase] Cloud database verified and operational.");
         return cachedDb;
-      } catch {
+      } catch (poolErr: any) {
+        console.error("[PostgreSQL/Supabase Connection Notice]:", poolErr?.message || poolErr);
         await pool.end().catch(() => {});
         usingEmbeddedFallback = true;
         return await initEmbeddedPglite();
@@ -2127,21 +2166,27 @@ export async function getBuildingSnapshot(buildingId: number): Promise<BuildingS
 
   const promise = (async () => {
     const db = await requireDb();
+    let targetBuildingId = buildingId;
+    const direct = (await db.select({ id: buildings.id }).from(buildings).where(eq(buildings.id, targetBuildingId)).limit(1))[0];
+    if (!direct) {
+      const fallback = (await db.select({ id: buildings.id }).from(buildings).limit(1))[0];
+      if (fallback) targetBuildingId = fallback.id;
+    }
     const [floorRows, roomRows, tenantRows, tenantServiceRows, allocationRows, rentRows, electricityRows, expenseRows, operatingCostRows, serviceChargeRows, reminderRows, notificationRows, tenantChargeRows, transferRows] = await Promise.all([
-      db.select().from(floors).where(eq(floors.buildingId, buildingId)),
-      db.select().from(rooms).where(eq(rooms.buildingId, buildingId)),
-      db.select().from(tenants).where(eq(tenants.buildingId, buildingId)),
-      db.select().from(tenantServices).where(eq(tenantServices.buildingId, buildingId)).orderBy(tenantServices.tenantId),
-      db.select().from(roomAllocations).where(eq(roomAllocations.buildingId, buildingId)),
-      db.select().from(rentPayments).where(eq(rentPayments.buildingId, buildingId)).orderBy(desc(rentPayments.dueDate)),
-      db.select().from(electricityBills).where(eq(electricityBills.buildingId, buildingId)).orderBy(desc(electricityBills.billingMonth)),
-      db.select().from(expenses).where(eq(expenses.buildingId, buildingId)).orderBy(desc(expenses.expenseDate)),
-      db.select().from(operatingCosts).where(eq(operatingCosts.buildingId, buildingId)).orderBy(desc(operatingCosts.costDate)),
-      db.select().from(serviceCharges).where(eq(serviceCharges.buildingId, buildingId)).orderBy(serviceCharges.name),
-      db.select().from(reminders).where(eq(reminders.buildingId, buildingId)).orderBy(reminders.dueDate),
-      db.select().from(managerNotifications).where(eq(managerNotifications.buildingId, buildingId)).orderBy(desc(managerNotifications.createdAt)).limit(40),
-      db.select().from(tenantCharges).where(eq(tenantCharges.buildingId, buildingId)).orderBy(desc(tenantCharges.createdAt)),
-      db.select().from(tenantTransfers).where(eq(tenantTransfers.buildingId, buildingId)).orderBy(desc(tenantTransfers.effectiveDate)),
+      db.select().from(floors).where(eq(floors.buildingId, targetBuildingId)),
+      db.select().from(rooms).where(eq(rooms.buildingId, targetBuildingId)),
+      db.select().from(tenants).where(eq(tenants.buildingId, targetBuildingId)),
+      db.select().from(tenantServices).where(eq(tenantServices.buildingId, targetBuildingId)).orderBy(tenantServices.tenantId),
+      db.select().from(roomAllocations).where(eq(roomAllocations.buildingId, targetBuildingId)),
+      db.select().from(rentPayments).where(eq(rentPayments.buildingId, targetBuildingId)).orderBy(desc(rentPayments.dueDate)),
+      db.select().from(electricityBills).where(eq(electricityBills.buildingId, targetBuildingId)).orderBy(desc(electricityBills.billingMonth)),
+      db.select().from(expenses).where(eq(expenses.buildingId, targetBuildingId)).orderBy(desc(expenses.expenseDate)),
+      db.select().from(operatingCosts).where(eq(operatingCosts.buildingId, targetBuildingId)).orderBy(desc(operatingCosts.costDate)),
+      db.select().from(serviceCharges).where(eq(serviceCharges.buildingId, targetBuildingId)).orderBy(serviceCharges.name),
+      db.select().from(reminders).where(eq(reminders.buildingId, targetBuildingId)).orderBy(reminders.dueDate),
+      db.select().from(managerNotifications).where(eq(managerNotifications.buildingId, targetBuildingId)).orderBy(desc(managerNotifications.createdAt)).limit(40),
+      db.select().from(tenantCharges).where(eq(tenantCharges.buildingId, targetBuildingId)).orderBy(desc(tenantCharges.createdAt)),
+      db.select().from(tenantTransfers).where(eq(tenantTransfers.buildingId, targetBuildingId)).orderBy(desc(tenantTransfers.effectiveDate)),
     ]);
     const data = { floors: floorRows, rooms: roomRows, tenants: tenantRows, tenantServices: tenantServiceRows, allocations: allocationRows, rents: rentRows, electricity: electricityRows, expenses: expenseRows, operatingCosts: operatingCostRows, serviceCharges: serviceChargeRows, reminders: reminderRows, managerNotifications: notificationRows, tenantCharges: tenantChargeRows, tenantTransfers: transferRows };
     snapshotCache.set(buildingId, { data, expiresAt: Date.now() + 2_500 });
@@ -2197,10 +2242,18 @@ export async function listReceiptReviewers(buildingId: number) {
 }
 
 export async function getDashboardOverview(buildingId: number, totalBuildings: number, periodMode: "monthly" | "yearly" = "monthly", periodKey?: string) {
-  const snapshot = await getBuildingSnapshot(buildingId);
   const db = await requireDb();
-  const building = (await db.select().from(buildings).where(eq(buildings.id, buildingId)).limit(1))[0];
-  if (!building) throw new Error("Selected building not found.");
+  let resolvedBuildingId = buildingId;
+  let building = (await db.select().from(buildings).where(eq(buildings.id, resolvedBuildingId)).limit(1))[0];
+  if (!building) {
+    building = (await db.select().from(buildings).limit(1))[0];
+    if (building) {
+      resolvedBuildingId = building.id;
+    } else {
+      throw new Error("No building configured in database.");
+    }
+  }
+  const snapshot = await getBuildingSnapshot(resolvedBuildingId);
   const period = getDashboardPeriod(periodMode, new Date(), periodKey);
   const month = period.key;
   const matchesPeriod = (value: string) => value.startsWith(month);
@@ -2446,11 +2499,17 @@ export async function createManagerCreditAdjustment(input: { buildingId: number;
 
 export async function getManagerProfitWorkspace(input: { buildingId: number; totalBuildings: number; periodMode: "monthly" | "yearly"; periodKey?: string }) {
   const db = await requireDb();
-  const overview = await getDashboardOverview(input.buildingId, input.totalBuildings, input.periodMode, input.periodKey);
+  let buildingId = input.buildingId;
+  const direct = (await db.select({ id: buildings.id }).from(buildings).where(eq(buildings.id, buildingId)).limit(1))[0];
+  if (!direct) {
+    const fallback = (await db.select({ id: buildings.id }).from(buildings).limit(1))[0];
+    if (fallback) buildingId = fallback.id;
+  }
+  const overview = await getDashboardOverview(buildingId, input.totalBuildings, input.periodMode, input.periodKey);
   const [settlementRows, governmentElectricityRows, creditAdjustments] = await Promise.all([
-    db.select().from(ownerSettlements).where(eq(ownerSettlements.buildingId, input.buildingId)).orderBy(desc(ownerSettlements.billingMonth)),
-    db.select().from(governmentElectricityPayments).where(eq(governmentElectricityPayments.buildingId, input.buildingId)).orderBy(desc(governmentElectricityPayments.billingMonth)),
-    db.select().from(managerCreditAdjustments).where(eq(managerCreditAdjustments.buildingId, input.buildingId)).orderBy(desc(managerCreditAdjustments.createdAt)),
+    db.select().from(ownerSettlements).where(eq(ownerSettlements.buildingId, buildingId)).orderBy(desc(ownerSettlements.billingMonth)),
+    db.select().from(governmentElectricityPayments).where(eq(governmentElectricityPayments.buildingId, buildingId)).orderBy(desc(governmentElectricityPayments.billingMonth)),
+    db.select().from(managerCreditAdjustments).where(eq(managerCreditAdjustments.buildingId, buildingId)).orderBy(desc(managerCreditAdjustments.createdAt)),
   ]);
   const currentSettlement = settlementRows.find(settlement => settlement.billingMonth === overview.summary.periodKey) ?? null;
   const currentGovernmentElectricity = governmentElectricityRows.find(payment => payment.billingMonth === overview.summary.periodKey) ?? null;
